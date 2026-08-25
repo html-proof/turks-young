@@ -1,5 +1,10 @@
 {
   "database": {
     "rules": "firebase-database.rules.json"
-  }
+  },
+  "dataconnect": [
+    {
+      "source": "music_app/dataconnect"
+    }
+  ]
 }

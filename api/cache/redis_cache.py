@@ -1,34 +1,33 @@
 """
-Redis-backed cache with transparent JSON serialisation.
+Upstash Redis-backed cache with transparent JSON serialisation.
 
-Gracefully degrades to a no-op when Redis is unavailable so the API
+Uses upstash_redis.asyncio (HTTP/REST) so no TCP connection is needed —
+works on Render free tier without a sidecar Redis process.
+
+Gracefully degrades to a no-op when Upstash is not configured so the API
 keeps working without a cache layer.
 """
 import json
 import logging
 from typing import Any
 
-import redis.asyncio as aioredis
-
 logger = logging.getLogger(__name__)
-
-_SENTINEL = object()
 
 
 class RedisCache:
-    def __init__(self, redis_url: str):
-        self._url = redis_url
-        self._client: aioredis.Redis | None = None
+    def __init__(self, url: str, token: str):
+        self._url = url
+        self._token = token
+        self._client = None
         self._available = False
 
     async def connect(self) -> bool:
+        if not self._url or not self._token:
+            logger.warning("cache status=disabled reason=UPSTASH_REDIS_REST_URL or TOKEN not set")
+            return False
         try:
-            self._client = aioredis.from_url(
-                self._url,
-                decode_responses=True,
-                socket_connect_timeout=2,
-                socket_timeout=2,
-            )
+            from upstash_redis.asyncio import Redis
+            self._client = Redis(url=self._url, token=self._token)
             await self._client.ping()
             self._available = True
             logger.info("cache status=connected url=%s", self._url)
@@ -38,8 +37,7 @@ class RedisCache:
         return self._available
 
     async def close(self) -> None:
-        if self._client:
-            await self._client.aclose()
+        self._client = None
 
     async def get(self, key: str) -> Any | None:
         if not self._available or not self._client:
@@ -48,7 +46,7 @@ class RedisCache:
             raw = await self._client.get(key)
             if raw is None:
                 return None
-            return json.loads(raw)
+            return json.loads(raw) if isinstance(raw, str) else raw
         except Exception as exc:
             logger.debug("cache get key=%s error=%s", key, exc)
             return None

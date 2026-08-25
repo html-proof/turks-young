@@ -1,0 +1,79 @@
+services:
+  - type: web
+    name: soundwaves-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    plan: free
+
+    envVars:
+      - key: LOG_LEVEL
+        value: INFO
+
+      - key: CORS_ALLOW_ORIGINS
+        value: "*"
+
+      - key: FIREBASE_PROJECT_ID
+        value: personal-songs
+
+      - key: FIREBASE_DATABASE_URL
+        value: https://personal-songs-default-rtdb.firebaseio.com
+
+      - key: FIREBASE_APP_NAME
+        value: songlist-backend
+
+      # Upload service_account.json as a Render Secret File →
+      # it gets mounted at /etc/secrets/service_account.json
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/service_account.json
+
+      # ── Upstash Redis (set token value in Render UI, not here) ────────────
+      - key: UPSTASH_REDIS_REST_URL
+        value: https://humorous-horse-160323.upstash.io
+
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false   # Render will prompt you to enter the token securely
+
+      # ── Upstream tuning ───────────────────────────────────────────────────
+      - key: UPSTREAM_TIMEOUT
+        value: "5"
+
+      - key: UPSTREAM_MAX_RETRIES
+        value: "2"
+
+      - key: CB_FAILURE_THRESHOLD
+        value: "5"
+
+      - key: CB_RECOVERY_TIMEOUT
+        value: "30"
+
+      - key: CB_WINDOW
+        value: "60"
+
+      # ── Cache TTLs ────────────────────────────────────────────────────────
+      - key: TTL_SONG
+        value: "21600"
+
+      - key: TTL_ALBUM
+        value: "21600"
+
+      - key: TTL_ARTIST
+        value: "21600"
+
+      - key: TTL_PLAYLIST
+        value: "3600"
+
+      - key: TTL_SEARCH
+        value: "900"
+
+      - key: TTL_CHARTS
+        value: "600"
+
+      - key: TTL_TRENDING
+        value: "600"
+
+      - key: TTL_NEW_RELEASES
+        value: "900"
+
+      - key: TTL_SIMILAR
+        value: "3600"

@@ -123,7 +123,7 @@ async def startup_event():
     gaanapy = GaanaPy()
     app.state.gaanapy = gaanapy
 
-    cache = RedisCache(config.REDIS_URL)
+    cache = RedisCache(config.UPSTASH_REDIS_REST_URL, config.UPSTASH_REDIS_REST_TOKEN)
     await cache.connect()
     app.state.cache = cache
 
