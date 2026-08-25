@@ -28,6 +28,11 @@ services:
         value: /etc/secrets/service_account.json
 
       # ── Upstash Redis (set token value in Render UI, not here) ────────────
+      # ── Supabase PostgreSQL ───────────────────────────────────────────────────
+      - key: DATABASE_URL
+        sync: false   # set securely in Render dashboard (contains password)
+
+      # ── Upstash Redis (set token value in Render UI, not here) ────────────
       - key: UPSTASH_REDIS_REST_URL
         value: https://humorous-horse-160323.upstash.io
 

@@ -13,9 +13,10 @@ from firebase_admin import exceptions as firebase_exceptions
 
 from api.cache.redis_cache import RedisCache
 from api.core import config
+from api.db.connection import create_pool
 from api.firebase import FirebaseRuntime
 from api.gaanapy import GaanaPy
-from api.personalization.repository import FirebaseUserRepository
+from api.personalization.repository import PostgresUserRepository
 from api.personalization.routes import router as personalization_router
 from api.personalization.service import PersonalizedMusicService
 
@@ -116,6 +117,7 @@ app.state.gaanapy = None
 app.state.user_repository = None
 app.state.personalization_service = None
 app.state.cache = None
+app.state.db_pool = None
 
 
 @app.on_event("startup")
@@ -127,10 +129,18 @@ async def startup_event():
     await cache.connect()
     app.state.cache = cache
 
-    if firebase_runtime.initialize():
-        repo = FirebaseUserRepository(firebase_runtime.app)
-        app.state.user_repository = repo
-        app.state.personalization_service = PersonalizedMusicService(repo)
+    firebase_runtime.initialize()  # still needed for JWT verification
+
+    if config.DATABASE_URL:
+        try:
+            pool = await create_pool(config.DATABASE_URL)
+            app.state.db_pool = pool
+            repo = PostgresUserRepository(pool)
+            app.state.user_repository = repo
+            app.state.personalization_service = PersonalizedMusicService(repo)
+            logger.info('"msg":"postgres connected"')
+        except Exception as exc:
+            logger.warning('"msg":"postgres unavailable","error":"%s"', exc)
 
 
 @app.on_event("shutdown")
@@ -141,6 +151,8 @@ async def shutdown_event():
     cache: RedisCache | None = app.state.cache
     if cache:
         await cache.close()
+    if app.state.db_pool:
+        await app.state.db_pool.close()
     await firebase_runtime.close()
 
 # ---------------------------------------------------------------------------
@@ -218,7 +230,7 @@ async def ready(request: Request):
 
 @app.get("/", tags=["ops"])
 async def home():
-    return {"docs": "/docs", "github": "https://github.com/ZingyTomato/GaanaPy"}
+    return {"docs": "/docs", "github": "https://github.com/html-proof/turks-young"}
 
 # ---------------------------------------------------------------------------
 # Songs

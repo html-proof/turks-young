@@ -2,5 +2,10 @@ name = "soundwaves-cdn"
 main = "worker.js"
 compatibility_date = "2024-09-23"
 
+# Smart Placement — Cloudflare picks the PoP closest to the Render backend
+# (turks-young.onrender.com) for cache MISSes, minimising origin round-trip.
+[placement]
+mode = "smart"
+
 [observability]
 enabled = true

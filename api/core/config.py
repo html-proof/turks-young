@@ -1,5 +1,8 @@
 import os
 
+# ── Supabase PostgreSQL ────────────────────────────────────────────────────────
+DATABASE_URL = os.getenv("DATABASE_URL", "")  # postgresql://user:pass@host/db
+
 # ── Upstash Redis ──────────────────────────────────────────────────────────────
 UPSTASH_REDIS_REST_URL   = os.getenv("UPSTASH_REDIS_REST_URL", "")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")

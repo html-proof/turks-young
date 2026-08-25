@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, sta
 
 from api.auth import AuthenticatedUser, get_current_user
 from api.personalization.models import ListeningEvent, ProfileUpdate, TrackSnapshot
-from api.personalization.repository import FirebaseUserRepository
+from api.personalization.repository import PostgresUserRepository as FirebaseUserRepository
 from api.personalization.service import PersonalizedMusicService
 
 
@@ -19,7 +19,7 @@ async def get_user_repository(
     if repository is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Firebase Realtime Database is unavailable",
+            detail="Database is unavailable",
         )
     await repository.ensure_user(user)
     return repository
