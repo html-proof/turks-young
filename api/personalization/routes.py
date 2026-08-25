@@ -144,3 +144,61 @@ async def recommendations(
     if catalog is None:
         raise HTTPException(status_code=503, detail="Music catalog is unavailable")
     return await service.recommendations(user.uid, catalog, limit)
+
+
+@router.post(
+    "/recommendations/refresh",
+    summary="Rebuild taste signals from full listening history.",
+    status_code=status.HTTP_200_OK,
+)
+async def refresh_signals(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+    service: PersonalizedMusicService = Depends(get_personalization_service),
+) -> dict[str, Any]:
+    """
+    Replays the user's complete listening history and rebuilds the implicit
+    taste signals from scratch.  Call this after importing history or when
+    recommendations feel stale.
+    """
+    count = await service.rebuild_signals_from_history(user.uid)
+    return {"rebuilt": True, "events_processed": count}
+
+
+@router.get(
+    "/taste",
+    summary="Show the computed music taste profile used for recommendations.",
+)
+async def get_taste(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    """
+    Returns the merged preference-score map (artists, genres, languages) that
+    drives recommendations — useful for debugging and the 'Edit taste' UI.
+    """
+    import asyncio as _asyncio
+    from api.personalization.scorer import build_preference_scores, preferred_languages
+
+    profile, favorites, history, signals = await _asyncio.gather(
+        repository.get_profile(user.uid),
+        repository.list_favorites(user.uid),
+        repository.list_history(user.uid, 100),
+        repository.get_signals(user.uid),
+    )
+
+    prefs = build_preference_scores(profile, favorites, history, signals)
+    langs = preferred_languages(profile, prefs, max_languages=5)
+
+    def top_n(bucket: dict[str, float], n: int = 10) -> list[dict[str, Any]]:
+        return [
+            {"name": name.title(), "score": round(score, 1)}
+            for name, score in sorted(bucket.items(), key=lambda x: x[1], reverse=True)[:n]
+        ]
+
+    return {
+        "preferred_languages": langs,
+        "top_artists": top_n(prefs["artists"]),
+        "top_genres":  top_n(prefs["genres"]),
+        "is_cold_start": sum(sum(v.values()) for v in prefs.values()) < 10.0,
+    }

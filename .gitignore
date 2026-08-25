@@ -1,22 +1,27 @@
 # Python
-*.pyc
 __pycache__/
-.pytest_cache/
-*.venv
+*.py[cod]
+*.pyo
 .env
+.venv/
+venv/
+env/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Secrets
-*.key
-*.pem
+# Secrets — never commit these
 service_account.json
-firebase-adminsdk*.json
+*serviceAccount*.json
+*.pem
+*.key
 
-# Flutter / mobile — not part of this repo
-music_app/
-
-# Editor
+# IDE
 .vscode/
 .idea/
+
+# Flutter — excluded from this repo
+music_app/
