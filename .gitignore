@@ -1,4 +1,22 @@
+# Python
 *.pyc
+__pycache__/
+.pytest_cache/
 *.venv
-.__pycache__
-.pytest_cache
+.env
+*.egg-info/
+dist/
+build/
+
+# Secrets
+*.key
+*.pem
+service_account.json
+firebase-adminsdk*.json
+
+# Flutter / mobile — not part of this repo
+music_app/
+
+# Editor
+.vscode/
+.idea/

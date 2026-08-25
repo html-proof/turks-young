@@ -3,7 +3,8 @@ class Playlists:
         endpoints = self.api_endpoints
         errors = self.errors
         result = await self._safe_request("POST", endpoints.playlist_details_url + playlist_id)
-        if isinstance(result, dict) and "error" in result:
+        upstream_error = result.get("error") if isinstance(result, dict) else None
+        if upstream_error not in (None, "", "SUCCESS"):
             return result
         track_count = result.get('count')
         if not track_count:

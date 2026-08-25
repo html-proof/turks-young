@@ -1,7 +1,13 @@
 services:
   gaanapy:
-    image: zingytomato/gaanapy:main
+    build: .
+    image: songlist-backend:local
     container_name: gaanapy
     ports:
       - "8000:8000"
+    environment:
+      FIREBASE_DATABASE_URL: ${FIREBASE_DATABASE_URL:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
     restart: unless-stopped
