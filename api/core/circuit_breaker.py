@@ -56,6 +56,8 @@ class CircuitBreaker:
                     self._state = CBState.HALF_OPEN
                     logger.info("circuit_breaker name=%s state=half_open", self.name)
                 else:
+                    if hasattr(coro, "close"):
+                        coro.close()
                     raise CircuitOpenError(self.name)
 
         try:

@@ -1,6 +1,20 @@
+import re
 from typing import Any
 
 from api.lyrics.service import duration_seconds
+
+
+def _upgrade_image_quality(url: str | None) -> str | None:
+    if not url or not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    if url.startswith("http://"):
+        url = "https://" + url[7:]
+    # Upgrade low-res thumbnail dimensions to 500x500 HD
+    url = re.sub(r'[-_](?:50x50|80x80|150x150|250x250|320x320)(\.[a-zA-Z0-9]+)$', r'-500x500\1', url)
+    return url
 
 
 def _csv(value: Any) -> list[str]:
@@ -10,6 +24,7 @@ def _csv(value: Any) -> list[str]:
 
 
 def _image(item: dict[str, Any]) -> str | None:
+    raw: str | None = None
     for key in (
         "imageUrl", "image_url", "thumbnail", "photo", "artist_image",
         "artworkUrl", "artwork", "artwork_large", "artwork_web",
@@ -17,30 +32,38 @@ def _image(item: dict[str, Any]) -> str | None:
     ):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
-    direct_image = item.get("image")
-    if isinstance(direct_image, str) and direct_image.strip():
-        return direct_image.strip()
-    if isinstance(direct_image, dict):
-        for key in ("large", "medium", "small", "url"):
-            value = direct_image.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    urls = (item.get("images") or {}).get("urls") or {}
-    return (
-        urls.get("large_artwork") or urls.get("medium_artwork")
-        or urls.get("small_artwork") or urls.get("large")
-        or urls.get("medium") or urls.get("small") or None
-    )
+            raw = value.strip()
+            break
+    if not raw:
+        direct_image = item.get("image")
+        if isinstance(direct_image, str) and direct_image.strip():
+            raw = direct_image.strip()
+        elif isinstance(direct_image, dict):
+            for key in ("large", "medium", "small", "url"):
+                value = direct_image.get(key)
+                if isinstance(value, str) and value.strip():
+                    raw = value.strip()
+                    break
+    if not raw:
+        urls = (item.get("images") or {}).get("urls") or {}
+        raw = (
+            urls.get("large_artwork") or urls.get("medium_artwork")
+            or urls.get("small_artwork") or urls.get("large")
+            or urls.get("medium") or urls.get("small") or None
+        )
+    return _upgrade_image_quality(raw)
 
 
 def _images(item: dict[str, Any]) -> dict[str, str]:
     urls = (item.get("images") or {}).get("urls") or {}
     fallback = _image(item) or ""
+    small = _upgrade_image_quality(urls.get("small_artwork") or urls.get("small")) or fallback
+    medium = _upgrade_image_quality(urls.get("medium_artwork") or urls.get("medium")) or fallback
+    large = _upgrade_image_quality(urls.get("large_artwork") or urls.get("large")) or fallback
     return {
-        "small": urls.get("small_artwork") or urls.get("small") or fallback,
-        "medium": urls.get("medium_artwork") or urls.get("medium") or fallback,
-        "large": urls.get("large_artwork") or urls.get("large") or fallback,
+        "small": small,
+        "medium": medium,
+        "large": large,
     }
 
 
@@ -52,13 +75,13 @@ def _song_artwork(item: dict[str, Any]) -> str | None:
     ):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return _upgrade_image_quality(value.strip())
     album_value = item.get("album")
     if isinstance(album_value, dict):
         for key in ("artworkUrl", "imageUrl", "image_url", "artwork"):
             value = album_value.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
+                return _upgrade_image_quality(value.strip())
     urls = (item.get("images") or {}).get("urls") or {}
     for key in (
         "large_artwork", "medium_artwork", "small_artwork",
@@ -66,12 +89,12 @@ def _song_artwork(item: dict[str, Any]) -> str | None:
     ):
         value = urls.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return _upgrade_image_quality(value.strip())
     artist_image = str(item.get("artist_image") or "").strip()
     for key in ("imageUrl", "image_url", "thumbnail"):
         value = item.get(key)
         if isinstance(value, str) and value.strip() and value.strip() != artist_image:
-            return value.strip()
+            return _upgrade_image_quality(value.strip())
     return None
 
 

@@ -84,7 +84,7 @@ async def search_discover(request: Request, limit: int = Query(12, ge=1, le=30))
 @router.get("/artists/{artist_id}", summary="Get an artist and its separated content sections.")
 async def artist_details(
     request: Request,
-    artist_id: str = Path(..., min_length=1, max_length=200, pattern=r"^[a-z0-9\-]+$"),
+    artist_id: str = Path(..., min_length=1, max_length=500),
     limit: int = Query(20, ge=1, le=50),
 ):
     result = await _service(request).artist_details(artist_id, limit)
@@ -96,11 +96,20 @@ async def artist_details(
 @router.get("/albums/{album_id}", summary="Get an album and its backend-provided tracklist.")
 async def album_details(
     request: Request,
-    album_id: str = Path(..., min_length=1, max_length=200, pattern=r"^[a-z0-9\-]+$"),
+    album_id: str = Path(..., min_length=1, max_length=500),
 ):
     result = await _service(request).album_details(album_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Album not found")
+    return envelope(result)
+
+
+@router.get("/albums/{album_id}/recommendations", summary="Get smart album recommendations based on the current album.")
+async def album_recommendations(
+    request: Request,
+    album_id: str = Path(..., min_length=1, max_length=500),
+):
+    result = await _service(request).album_recommendations(album_id)
     return envelope(result)
 
 

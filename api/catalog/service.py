@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -505,6 +506,8 @@ class CatalogService:
             grouped.get("songs", []),
             grouped.get("albums", []),
         )
+        if "albums" in grouped:
+            grouped["albums"] = grouped["albums"][:20]
         all_ranked = [(confidence(normalized_query, item, key[:-1]), key[:-1], item)
                       for key in ("artists", "songs", "albums", "playlists") for item in grouped[key]]
         top = None
@@ -558,23 +561,320 @@ class CatalogService:
             result = _clean(await self.catalog.get_album_info([album_id], True))
         except Exception:
             logger.exception("album_details provider_failure album_id=%s", album_id)
-            raise
-        if not isinstance(result, list) or not result:
-            logger.warning("album_details empty_provider_response album_id=%s", album_id)
-            return None
-        try:
-            normalized_album = album(result[0])
-        except Exception:
-            logger.exception("album_details normalization_failure album_id=%s", album_id)
-            raise
-        if not normalized_album["id"] or not normalized_album["name"]:
-            logger.warning("album_details invalid_normalized_album album_id=%s", album_id)
-            return None
-        logger.info(
-            "album_details album_id=%s provider_count=%d track_count=%d",
-            album_id, len(result), len(normalized_album.get("tracks") or []),
+            result = None
+
+        if isinstance(result, list) and result:
+            try:
+                normalized_album = album(result[0])
+                if (normalized_album.get("id") or normalized_album.get("provider_id")) and normalized_album.get("name"):
+                    logger.info(
+                        "album_details album_id=%s provider_count=%d track_count=%d",
+                        album_id, len(result), len(normalized_album.get("tracks") or []),
+                    )
+                    return normalized_album
+            except Exception:
+                logger.exception("album_details normalization_failure album_id=%s", album_id)
+
+        # Resilient fallback: Search by album title / query if direct album info returned empty
+        clean_query = album_id.replace("-", " ").replace("_", " ").strip()
+        if clean_query:
+            try:
+                # Try search_albums first
+                album_search = _clean(await self.catalog.search_albums(clean_query, 5))
+                if isinstance(album_search, list) and album_search:
+                    for cand in album_search:
+                        cand_id = str(cand.get("album_id") or cand.get("id") or cand.get("seokey") or "")
+                        if cand_id and cand_id != album_id:
+                            info = _clean(await self.catalog.get_album_info([cand_id], True))
+                            if isinstance(info, list) and info:
+                                norm = album(info[0])
+                                if norm.get("name") and (norm.get("tracks") or norm.get("songs")):
+                                    return norm
+            except Exception as exc:
+                logger.warning("album_details search fallback failed album_id=%s error=%s", album_id, exc)
+
+            try:
+                # Try search_songs to build album and tracklist
+                song_search = _clean(await self.catalog.search_songs(clean_query, 20))
+                if isinstance(song_search, list) and song_search:
+                    song_items = items(song_search, "song")
+                    if song_items:
+                        first = song_items[0]
+                        first_album_raw = first.get("album")
+                        first_album_name = (
+                            first_album_raw.get("title") or first_album_raw.get("name") or clean_query.title()
+                            if isinstance(first_album_raw, dict)
+                            else str(first_album_raw or clean_query.title())
+                        )
+                        first_album_img = (
+                            first_album_raw.get("artworkUrl")
+                            if isinstance(first_album_raw, dict)
+                            else first.get("image_url") or ""
+                        )
+                        matched_songs = [
+                            s for s in song_items
+                            if (
+                                (isinstance(s.get("album"), dict) and s["album"].get("name", "").lower() == first_album_name.lower())
+                                or str(s.get("album") or "").lower() == first_album_name.lower()
+                            )
+                        ]
+                        resolved_songs = matched_songs if matched_songs else song_items[:12]
+                        return {
+                            "id": str(first.get("album_id") or album_id),
+                            "provider_id": str(first.get("album_id") or album_id),
+                            "type": "album",
+                            "name": first_album_name,
+                            "title": first_album_name,
+                            "image_url": first_album_img,
+                            "imageUrl": first_album_img,
+                            "artworkUrl": first_album_img,
+                            "artists": first.get("artists") or [],
+                            "artistNames": [first.get("artist") or ""] if first.get("artist") else [],
+                            "song_count": len(resolved_songs),
+                            "trackCount": len(resolved_songs),
+                            "songs": resolved_songs,
+                            "tracks": resolved_songs,
+                        }
+            except Exception as exc:
+                logger.warning("album_details song search fallback failed album_id=%s error=%s", album_id, exc)
+
+        return None
+
+    async def album_recommendations(
+        self, album_id: str, user_profile: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Generate smart album recommendations for the currently viewed album."""
+        cache_key = f"music:album:recs:{album_id}:v2"
+
+        async def compute_recommendations() -> dict[str, Any]:
+            alb = await self.album_details(album_id)
+            if not alb:
+                return {
+                    "albumId": album_id,
+                    "primaryArtist": "",
+                    "recommendations": [],
+                    "moreByArtist": [],
+                    "youMightAlsoLike": [],
+                }
+
+            canonical_id = alb.get("id") or album_id
+            current_title = (alb.get("title") or alb.get("name") or "").lower().strip()
+            artist_names = [n for n in (alb.get("artistNames") or [alb.get("artist") or ""]) if n]
+            primary_artist = artist_names[0] if artist_names else ""
+            album_lang = str(alb.get("language") or "").strip()
+            album_year = alb.get("releaseYear")
+            album_genre = str(alb.get("genre") or alb.get("label") or "").strip()
+
+            candidates_raw: list[dict[str, Any]] = []
+            tasks = []
+
+            # 1. Primary artist albums
+            if primary_artist and hasattr(self.catalog, "search_albums"):
+                async def fetch_primary():
+                    try:
+                        res = await asyncio.wait_for(self.catalog.search_albums(primary_artist, 12), timeout=3.5)
+                        if isinstance(res, list):
+                            return res
+                    except Exception:
+                        pass
+                    return []
+                tasks.append(fetch_primary())
+
+            # 2. Secondary participating artists albums
+            for sec_artist in artist_names[1:3]:
+                if hasattr(self.catalog, "search_albums"):
+                    async def fetch_sec(art=sec_artist):
+                        try:
+                            res = await asyncio.wait_for(self.catalog.search_albums(art, 6), timeout=3.5)
+                            if isinstance(res, list):
+                                return res
+                        except Exception:
+                            pass
+                        return []
+                    tasks.append(fetch_sec())
+
+            # 3. Same language new releases and search
+            if album_lang:
+                if hasattr(self.catalog, "get_new_releases"):
+                    async def fetch_new():
+                        try:
+                            res = await asyncio.wait_for(self.catalog.get_new_releases(album_lang, 12), timeout=3.5)
+                            if isinstance(res, list):
+                                return res
+                            elif isinstance(res, dict) and "albums" in res:
+                                return res["albums"]
+                        except Exception:
+                            pass
+                        return []
+                    tasks.append(fetch_new())
+                if hasattr(self.catalog, "search_albums"):
+                    async def fetch_lang_search():
+                        try:
+                            res = await asyncio.wait_for(self.catalog.search_albums(album_lang, 12), timeout=3.5)
+                            if isinstance(res, list):
+                                return res
+                        except Exception:
+                            pass
+                        return []
+                    tasks.append(fetch_lang_search())
+
+            # 4. User preferred language fallback
+            user_langs = (user_profile or {}).get("languages") or []
+            for u_lang in user_langs[:2]:
+                if u_lang.lower() != album_lang.lower() and hasattr(self.catalog, "get_new_releases"):
+                    async def fetch_user_lang(l=u_lang):
+                        try:
+                            res = await asyncio.wait_for(self.catalog.get_new_releases(l, 8), timeout=3.5)
+                            if isinstance(res, list):
+                                return res
+                        except Exception:
+                            pass
+                        return []
+                    tasks.append(fetch_user_lang())
+
+            if tasks:
+                results_list = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in results_list:
+                    if isinstance(res, list):
+                        candidates_raw.extend(res)
+
+            seen_ids: set[str] = {album_id.lower().strip(), canonical_id.lower().strip()}
+            seen_semantic_keys: set[str] = set()
+            scored: list[tuple[int, dict[str, Any]]] = []
+
+            def _clean_title(t: str) -> str:
+                t = t.lower().strip()
+                t = re.sub(r'[\(\[\{].*?[\)\]\}]', '', t)
+                t = re.sub(r'\b(?:original motion picture soundtrack|soundtrack|ost|vol(?:ume)?\.?\s*\d+|ep|single)\b', '', t, flags=re.I)
+                return re.sub(r'[^a-z0-9]+', '', t).strip()
+
+            current_clean_title = _clean_title(current_title)
+            if current_clean_title:
+                curr_art_key = re.sub(r'[^a-z0-9]+', '', primary_artist.lower()).strip()
+                seen_semantic_keys.add(f"{current_clean_title}-{curr_art_key}")
+
+            user_fav_artists = [a.lower() for a in ((user_profile or {}).get("favorite_artists") or [])]
+            user_pref_langs = [l.lower() for l in user_langs]
+
+            for raw in candidates_raw:
+                if not isinstance(raw, dict):
+                    continue
+                norm = album(raw)
+                cid = str(norm.get("id") or norm.get("seokey") or "").strip()
+                ctitle = str(norm.get("title") or norm.get("name") or "").strip()
+                if not cid or not ctitle:
+                    continue
+
+                cid_lower = cid.lower()
+                cand_clean_title = _clean_title(ctitle)
+                cand_artists = [a.lower() for a in (norm.get("artistNames") or [norm.get("artist") or ""])]
+                primary_cand_art = cand_artists[0] if cand_artists else ""
+                art_key = re.sub(r'[^a-z0-9]+', '', primary_cand_art).strip()
+                semantic_key = f"{cand_clean_title}-{art_key}" if cand_clean_title else ""
+
+                if cid_lower in seen_ids:
+                    continue
+                if semantic_key and semantic_key in seen_semantic_keys:
+                    continue
+                if cand_clean_title and cand_clean_title == current_clean_title:
+                    continue
+
+                seen_ids.add(cid_lower)
+                if semantic_key:
+                    seen_semantic_keys.add(semantic_key)
+
+                score = 0
+                reason = "genre_language"
+
+                # Priority 1: Same primary artist (+50)
+                if primary_artist and any(primary_artist.lower() in a for a in cand_artists):
+                    score += 50
+                    reason = "same_artist"
+                # Priority 1b: Participating artists (+35)
+                elif any(any(orig.lower() in a for orig in artist_names) for a in cand_artists):
+                    score += 35
+                    reason = "same_artist"
+                # Priority 2: Related artist / user liked artist (+15 to +25)
+                elif any(fa in a for fa in user_fav_artists for a in cand_artists):
+                    score += 25
+                    reason = "related_artist"
+
+                # Priority 3: Same language (+20)
+                cand_lang = norm.get("language", "").lower()
+                if album_lang and cand_lang == album_lang.lower():
+                    score += 20
+                elif cand_lang in user_pref_langs:
+                    score += 15
+
+                # Genre matching (+20)
+                cand_genre = (norm.get("genre") or norm.get("label") or "").lower()
+                if album_genre and cand_genre and (album_genre.lower() in cand_genre or cand_genre in album_genre.lower()):
+                    score += 20
+
+                # Priority 4: Release year similarity (+10 or +5)
+                cyear = norm.get("releaseYear")
+                if cyear and album_year:
+                    diff = abs(cyear - album_year)
+                    if diff <= 3:
+                        score += 10
+                    elif diff <= 6:
+                        score += 5
+
+                # Base popularity (+5)
+                if norm.get("song_count", 0) > 0:
+                    score += 5
+
+                rec_item = {
+                    "id": cid,
+                    "title": norm.get("title") or norm.get("name") or "",
+                    "artistId": (norm.get("artistIds") or [""])[0],
+                    "artistName": (norm.get("artistNames") or [""])[0] or norm.get("artist") or "",
+                    "imageUrl": norm.get("imageUrl") or norm.get("image_url") or "",
+                    "releaseYear": norm.get("releaseYear"),
+                    "language": norm.get("language") or "",
+                    "genre": norm.get("genre") or "",
+                    "songCount": norm.get("song_count") or norm.get("trackCount") or 0,
+                    "reason": reason,
+                }
+                scored.append((score, rec_item))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            used_rec_ids: set[str] = set()
+            more_by_artist: list[dict[str, Any]] = []
+            for sc, item in scored:
+                iid = str(item.get("id") or "").lower()
+                if item["reason"] == "same_artist" and iid not in used_rec_ids:
+                    used_rec_ids.add(iid)
+                    more_by_artist.append(item)
+                if len(more_by_artist) >= 12:
+                    break
+
+            you_might_like: list[dict[str, Any]] = []
+            for sc, item in scored:
+                iid = str(item.get("id") or "").lower()
+                if iid not in used_rec_ids:
+                    used_rec_ids.add(iid)
+                    you_might_like.append(item)
+                if len(you_might_like) >= 16:
+                    break
+
+            all_recs = more_by_artist + you_might_like
+
+            return {
+                "albumId": album_id,
+                "primaryArtist": primary_artist,
+                "recommendations": all_recs,
+                "moreByArtist": more_by_artist,
+                "youMightAlsoLike": you_might_like,
+            }
+
+        return await self._cached(
+            cache_key,
+            config.TTL_ALBUM if hasattr(config, "TTL_ALBUM") else 1800,
+            compute_recommendations,
+            config.STALE_CACHE_TTL if hasattr(config, "STALE_CACHE_TTL") else 3600,
         )
-        return normalized_album
 
     async def home_page(
         self,
