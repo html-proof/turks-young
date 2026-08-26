@@ -3,6 +3,11 @@ import os
 # ── Supabase PostgreSQL ────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "")  # postgresql://user:pass@host/db
 
+# ── Firebase ───────────────────────────────────────────────────────────────────
+# Paste the entire service-account JSON string from:
+# Firebase Console → Project Settings → Service Accounts → Generate new private key
+FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
+
 # ── Upstash Redis ──────────────────────────────────────────────────────────────
 UPSTASH_REDIS_REST_URL   = os.getenv("UPSTASH_REDIS_REST_URL", "")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
@@ -25,3 +30,12 @@ TTL_CHARTS       = int(os.getenv("TTL_CHARTS",       "600"))
 TTL_TRENDING     = int(os.getenv("TTL_TRENDING",     "600"))
 TTL_NEW_RELEASES = int(os.getenv("TTL_NEW_RELEASES", "900"))
 TTL_SIMILAR      = int(os.getenv("TTL_SIMILAR",      "3600"))
+
+# ── Lyrics ────────────────────────────────────────────────────────────────────
+LYRICS_PROVIDER = os.getenv("LYRICS_PROVIDER", "lrclib")
+LYRICS_USER_AGENT = os.getenv(
+    "LYRICS_USER_AGENT", "MusicHub/1.0 (https://github.com/html-proof/turks-young)"
+)
+LYRICS_TIMEOUT = float(os.getenv("LYRICS_TIMEOUT", "10"))
+TTL_LYRICS = int(os.getenv("TTL_LYRICS", "2592000"))
+TTL_LYRICS_NOT_FOUND = int(os.getenv("TTL_LYRICS_NOT_FOUND", "21600"))

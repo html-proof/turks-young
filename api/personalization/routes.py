@@ -1,9 +1,11 @@
+import asyncio
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 
 from api.auth import AuthenticatedUser, get_current_user
+from api.firebase import FirebaseRuntime
 from api.personalization.models import (
     AlbumSnapshot,
     ArtistSnapshot,
@@ -420,6 +422,7 @@ async def list_followers(
 
 @users_router.post("/{uid}/follow", status_code=status.HTTP_204_NO_CONTENT, summary="Follow a user.")
 async def follow_user(
+    request: Request,
     uid: str = Path(..., min_length=1, max_length=128),
     current_user: AuthenticatedUser = Depends(get_current_user),
     repository: FirebaseUserRepository = Depends(get_user_repository),
@@ -427,6 +430,29 @@ async def follow_user(
     if uid == current_user.uid:
         raise HTTPException(status_code=400, detail="Cannot follow yourself")
     await repository.follow_user(current_user.uid, uid)
+    actor = current_user.display_name or "Someone"
+    firebase: FirebaseRuntime = request.app.state.firebase
+
+    async def _push() -> None:
+        try:
+            await repository.create_notification(
+                uid, "follow",
+                f"{actor} started following you",
+                "Tap to view their profile",
+                {"type": "follow", "from_uid": current_user.uid},
+            )
+            tokens = await repository.get_device_tokens(uid)
+            if tokens:
+                await firebase.send_push_notification(
+                    tokens,
+                    f"{actor} started following you",
+                    "Tap to view their profile",
+                    {"type": "follow", "from_uid": current_user.uid},
+                )
+        except Exception:
+            pass
+
+    asyncio.create_task(_push())
 
 
 @users_router.delete("/{uid}/follow", status_code=status.HTTP_204_NO_CONTENT, summary="Unfollow a user.")

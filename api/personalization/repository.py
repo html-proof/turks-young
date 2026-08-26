@@ -647,7 +647,29 @@ class PostgresUserRepository:
             )
         return result == "DELETE 1"
 
+    async def get_device_tokens(self, uid: str) -> list[str]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT token FROM device_tokens WHERE uid = $1", uid,
+            )
+        return [r["token"] for r in rows]
+
     # ── Notifications ──────────────────────────────────────────────────────────
+
+    async def create_notification(
+        self,
+        uid: str,
+        type_: str,
+        title: str,
+        body: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO notifications (uid, type, title, body, data) "
+                "VALUES ($1, $2, $3, $4, $5::jsonb)",
+                uid, type_, title, body, json.dumps(data or {}),
+            )
 
     async def list_notifications(self, uid: str, limit: int) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:

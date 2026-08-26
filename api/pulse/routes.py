@@ -1,9 +1,11 @@
+import asyncio
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 
 from api.auth import AuthenticatedUser, get_current_user
+from api.firebase import FirebaseRuntime
 from api.personalization.models import PulseCommentCreate, PulsePostCreate
 from api.personalization.repository import PostgresUserRepository
 
@@ -16,6 +18,31 @@ def _repo(request: Request) -> PostgresUserRepository:
     if repo is None:
         raise HTTPException(status_code=503, detail="Database is unavailable")
     return repo
+
+
+def _firebase(request: Request) -> FirebaseRuntime:
+    return request.app.state.firebase
+
+
+async def _notify(
+    request: Request,
+    target_uid: str,
+    actor_name: str,
+    type_: str,
+    title: str,
+    body: str,
+    data: dict[str, str],
+) -> None:
+    """Save an in-app notification and send an FCM push. Fire-and-forget."""
+    repo = _repo(request)
+    firebase = _firebase(request)
+    try:
+        await repo.create_notification(target_uid, type_, title, body, data)
+        tokens = await repo.get_device_tokens(target_uid)
+        if tokens:
+            await firebase.send_push_notification(tokens, title, body, data)
+    except Exception:
+        pass  # notifications are best-effort
 
 
 @router.get("/feed", summary="Get Pulse feed.")
@@ -67,8 +94,20 @@ async def like_post(
     post_id: UUID,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> None:
-    if not await _repo(request).like_post(user.uid, post_id):
+    repo = _repo(request)
+    post = await repo.get_pulse_post(post_id, user.uid)
+    if post is None:
         raise HTTPException(status_code=404, detail="Post not found")
+    await repo.like_post(user.uid, post_id)
+    if post["uid"] != user.uid:
+        actor = user.display_name or "Someone"
+        asyncio.create_task(_notify(
+            request, post["uid"], actor,
+            "pulse_like",
+            f"{actor} liked your post",
+            post.get("body", "")[:80] or "Check it out",
+            {"type": "pulse_like", "post_id": str(post_id)},
+        ))
 
 
 @router.delete("/posts/{post_id}/likes", status_code=status.HTTP_204_NO_CONTENT, summary="Unlike a post.")
@@ -102,9 +141,20 @@ async def add_comment(
     data: PulseCommentCreate,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    comment = await _repo(request).add_comment(user.uid, post_id, data)
+    repo = _repo(request)
+    comment = await repo.add_comment(user.uid, post_id, data)
     if comment is None:
         raise HTTPException(status_code=404, detail="Post not found")
+    post = await repo.get_pulse_post(post_id, user.uid)
+    if post and post["uid"] != user.uid:
+        actor = user.display_name or "Someone"
+        asyncio.create_task(_notify(
+            request, post["uid"], actor,
+            "pulse_comment",
+            f"{actor} commented on your post",
+            data.body[:80],
+            {"type": "pulse_comment", "post_id": str(post_id)},
+        ))
     return comment
 
 
