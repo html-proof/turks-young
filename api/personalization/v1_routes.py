@@ -24,6 +24,9 @@ async def google_auth(request: Request, user: AuthenticatedUser = Depends(get_cu
     if existing and existing["account_status"] != "deleted":
         if existing["account_status"] != "active":
             raise account_error("ACCOUNT_UNAVAILABLE", "This account is not active.", 403)
+        # Refresh email, display name, avatar, provider, and last_seen_at on
+        # every successful exchange so Supabase stays aligned with Firebase.
+        await repository.ensure_user(user)
     elif existing and existing["account_status"] == "deleted":
         # Deliberate recreation starts a fresh account; cascades remove the old
         # private data and onboarding state before provisioning the new record.

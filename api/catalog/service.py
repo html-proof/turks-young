@@ -15,6 +15,45 @@ from api.core import config
 logger = logging.getLogger(__name__)
 
 
+def _apply_album_artwork(
+    songs: list[dict[str, Any]],
+    albums: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach the matching album cover to songs without guessing by artist."""
+    artwork_by_key: dict[str, str] = {}
+    for value in albums:
+        artwork = str(
+            value.get("artworkUrl") or value.get("image_url")
+            or value.get("imageUrl") or ""
+        ).strip()
+        if not artwork:
+            continue
+        for identity in (value.get("id"), value.get("provider_id")):
+            if identity:
+                artwork_by_key[f"id:{identity}"] = artwork
+        title = normalize_query(str(value.get("title") or value.get("name") or ""))
+        if title:
+            artwork_by_key[f"title:{title}"] = artwork
+
+    hydrated: list[dict[str, Any]] = []
+    for value in songs:
+        result = dict(value)
+        album_value = result.get("album") if isinstance(result.get("album"), dict) else {}
+        keys = [
+            f"id:{album_value.get('id')}",
+            f"id:{album_value.get('provider_id')}",
+            f"title:{normalize_query(str(album_value.get('title') or album_value.get('name') or ''))}",
+        ]
+        artwork = next((artwork_by_key[key] for key in keys if key in artwork_by_key), None)
+        if artwork:
+            result["image_url"] = artwork
+            result["artworkUrl"] = artwork
+            if album_value:
+                result["album"] = {**album_value, "artworkUrl": artwork}
+        hydrated.append(result)
+    return hydrated
+
+
 class LanguageCatalog:
     _STANDARD_CODES = {
         "malayalam": "ml", "tamil": "ta", "hindi": "hi", "english": "en",
@@ -248,7 +287,7 @@ class CatalogService:
                 return _clean(await methods[kind](normalized_query, requested))
             # v2 invalidates older cache entries that were populated before
             # exact-match ranking and language metadata were fixed.
-            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v3", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v4", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
             normalized = rank(normalized_query, items(result, kind), kind, requested)
             # A movie search often has no movie name in the individual song
             # titles. Include the real soundtrack tracks when the query is an
@@ -312,7 +351,7 @@ class CatalogService:
             ], return_exceptions=True)
         # Keep the version in the key so old broad/fuzzy result sets cannot
         # hide a valid soundtrack such as Sarkar (Tamil).
-        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v3", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v4", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
         grouped: dict[str, list[dict[str, Any]]] = {}
         cursor = 0
         for result_kind in methods:
@@ -368,6 +407,10 @@ class CatalogService:
                     "song",
                     preview,
                 )
+        grouped["songs"] = _apply_album_artwork(
+            grouped.get("songs", []),
+            grouped.get("albums", []),
+        )
         all_ranked = [(confidence(normalized_query, item, key[:-1]), key[:-1], item)
                       for key in ("artists", "songs", "albums", "playlists") for item in grouped[key]]
         top = None

@@ -44,6 +44,37 @@ def _images(item: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _song_artwork(item: dict[str, Any]) -> str | None:
+    """Return verified track/album artwork without using an artist portrait."""
+    for key in (
+        "artwork_large", "artwork_web", "artwork_medium", "artwork",
+        "album_artwork", "artworkUrl",
+    ):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    album_value = item.get("album")
+    if isinstance(album_value, dict):
+        for key in ("artworkUrl", "imageUrl", "image_url", "artwork"):
+            value = album_value.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    urls = (item.get("images") or {}).get("urls") or {}
+    for key in (
+        "large_artwork", "medium_artwork", "small_artwork",
+        "large", "medium", "small",
+    ):
+        value = urls.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    artist_image = str(item.get("artist_image") or "").strip()
+    for key in ("imageUrl", "image_url", "thumbnail"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() != artist_image:
+            return value.strip()
+    return None
+
+
 def _int(value: Any) -> int:
     try:
         return int(float(str(value or 0).replace(",", "")))
@@ -84,9 +115,7 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
     # Provider song records expose artist_image alongside the actual album
     # artwork. Prefer the track/album artwork fields so every song keeps its
     # own cover instead of inheriting an artist portrait.
-    artwork_url = next((str(item.get(key)).strip() for key in (
-        "artwork_large", "artwork_web", "artwork", "album_artwork",
-    ) if item.get(key)), None) or _image(item)
+    artwork_url = _song_artwork(item)
     album_id = str(item.get("album_seokey") or item.get("album_id") or "")
     album_title = str(item.get("album") or "")
     return {

@@ -93,19 +93,28 @@ class Songs:
         data['stream_urls'] = {'urls': {}}
 
         try:
-            medium = results.get('urls', {}).get('medium', {})
-            if medium.get('message'):
-                base_url = await functions.decryptLink(medium['message'])
-                data['stream_urls']['urls']['very_high_quality'] = (
-                    base_url.replace("64.mp4", "320.mp4") if base_url else ""
-                )
-                data['stream_urls']['urls']['high_quality'] = (
-                    base_url.replace("64.mp4", "128.mp4") if base_url else ""
-                )
-                data['stream_urls']['urls']['medium_quality'] = base_url
-                data['stream_urls']['urls']['low_quality'] = (
-                    base_url.replace("64.mp4", "16.mp4") if base_url else ""
-                )
+            urls = results.get('urls', {})
+            stream_msg = ""
+            for quality in ('medium', 'high', 'auto'):
+                q_dict = urls.get(quality) if isinstance(urls, dict) else None
+                if isinstance(q_dict, dict) and q_dict.get('message'):
+                    stream_msg = q_dict['message']
+                    break
+            if stream_msg:
+                base_url = await functions.decryptLink(stream_msg)
+                if base_url:
+                    data['stream_urls']['urls']['very_high_quality'] = (
+                        base_url.replace("64.mp4", "320.mp4").replace("128.mp4", "320.mp4")
+                    )
+                    data['stream_urls']['urls']['high_quality'] = (
+                        base_url.replace("64.mp4", "128.mp4")
+                    )
+                    data['stream_urls']['urls']['medium_quality'] = base_url
+                    data['stream_urls']['urls']['low_quality'] = (
+                        base_url.replace("64.mp4", "16.mp4").replace("128.mp4", "16.mp4")
+                    )
+                else:
+                    raise KeyError
             else:
                 raise KeyError
         except (KeyError, AttributeError):
@@ -113,5 +122,13 @@ class Songs:
             data['stream_urls']['urls']['high_quality'] = ""
             data['stream_urls']['urls']['medium_quality'] = ""
             data['stream_urls']['urls']['low_quality'] = ""
+
+        data['stream_url'] = (
+            data['stream_urls']['urls'].get('very_high_quality')
+            or data['stream_urls']['urls'].get('high_quality')
+            or data['stream_urls']['urls'].get('medium_quality')
+            or data['stream_urls']['urls'].get('low_quality')
+            or ""
+        )
 
         return data

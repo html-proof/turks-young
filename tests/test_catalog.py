@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from api.catalog.normalize import album, artist, song
-from api.catalog.service import CatalogService, LanguageCatalog
+from api.catalog.service import CatalogService, LanguageCatalog, _apply_album_artwork
 from api.cache.redis_cache import RedisCache
 from api.catalog.search.ranking import rank
 from api.provider_search import encoded_query, search_entries
@@ -106,6 +106,33 @@ def test_artist_image_provider_aliases_are_normalized():
     for field in ("image", "image_url", "imageUrl", "thumbnail", "photo", "artist_image"):
         value = artist({"id": "artist-one", "name": "Artist One", field: "https://images.test/a.jpg"})
         assert value["imageUrl"] == "https://images.test/a.jpg"
+
+
+def test_song_never_uses_artist_portrait_as_artwork():
+    value = song({
+        "id": "song-one",
+        "title": "Song One",
+        "artists": "Artist One",
+        "artist_image": "https://images.test/artist.jpg",
+    })
+    assert value["image_url"] is None
+
+
+def test_search_song_uses_matching_album_artwork():
+    songs = [{
+        "id": "song-one",
+        "title": "Song One",
+        "album": {"id": "album-one", "title": "Album One"},
+        "image_url": None,
+    }]
+    albums = [{
+        "id": "album-one",
+        "title": "Album One",
+        "artworkUrl": "https://images.test/album.jpg",
+    }]
+    result = _apply_album_artwork(songs, albums)
+    assert result[0]["image_url"] == "https://images.test/album.jpg"
+    assert result[0]["album"]["artworkUrl"] == "https://images.test/album.jpg"
 
 
 def test_search_prefers_real_word_matches_over_fuzzy_neighbours():
