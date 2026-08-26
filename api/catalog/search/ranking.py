@@ -75,6 +75,29 @@ def score(query: str, item: dict[str, Any], kind: str) -> float:
     return best
 
 
+def _strong_match(query: str, item: dict[str, Any], kind: str) -> bool:
+    """Return true only for a real word/prefix match, not a fuzzy neighbour."""
+    q = normalize_query(query)
+    query_tokens = _tokens(q)
+    if not query_tokens:
+        return False
+    title, artists, album = _text(item, kind)
+    fields = [title] if kind == "artist" else [title, artists, album]
+    for value in fields:
+        normalized = normalize_query(value)
+        tokens = _tokens(normalized)
+        if normalized == q or normalized.startswith(q) or q in tokens:
+            return True
+        # Multi-word searches may match across a title and its artist credit,
+        # but every query word must still be present as a complete/prefix word.
+        if len(query_tokens) > 1 and all(
+            any(token == wanted or token.startswith(wanted) for token in tokens)
+            for wanted in query_tokens
+        ):
+            return True
+    return False
+
+
 def rank(query: str, values: list[dict[str, Any]], kind: str, limit: int) -> list[dict[str, Any]]:
     ranked: list[tuple[float, int, dict[str, Any]]] = []
     seen: set[str] = set()
@@ -86,6 +109,12 @@ def rank(query: str, values: list[dict[str, Any]], kind: str, limit: int) -> lis
         ranked_item = dict(item)
         ranked_item["_search_score"] = score(query, ranked_item, kind)
         ranked.append((ranked_item["_search_score"], index, ranked_item))
+    # Provider search is intentionally broad. If it gives us any genuine
+    # title/artist/album word matches, do not let typo-neighbours such as
+    # "pattanam" outrank or clutter results for "pattalam".
+    strong = [item for item in ranked if _strong_match(query, item[2], kind)]
+    if strong:
+        ranked = strong
     ranked.sort(key=lambda value: (-value[0], value[1]))
     return [{key: value for key, value in item.items() if key != "_search_score"} for _, _, item in ranked[:limit]]
 

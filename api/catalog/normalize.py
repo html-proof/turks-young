@@ -10,6 +10,18 @@ def _csv(value: Any) -> list[str]:
 
 
 def _image(item: dict[str, Any]) -> str | None:
+    for key in ("imageUrl", "image_url", "thumbnail", "photo", "artist_image", "artworkUrl", "artwork"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    direct_image = item.get("image")
+    if isinstance(direct_image, str) and direct_image.strip():
+        return direct_image.strip()
+    if isinstance(direct_image, dict):
+        for key in ("large", "medium", "small", "url"):
+            value = direct_image.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     urls = (item.get("images") or {}).get("urls") or {}
     return urls.get("large_artwork") or urls.get("medium_artwork") or urls.get("small_artwork") or None
 
@@ -32,13 +44,14 @@ def _int(value: Any) -> int:
 
 def artist(item: dict[str, Any]) -> dict[str, Any]:
     images = _images(item)
-    image_url = item.get("image_url") or images["large"] or images["medium"] or images["small"]
+    image_url = _image(item) or images["large"] or images["medium"] or images["small"]
     return {
         "id": str(item.get("seokey") or item.get("id") or ""),
         "provider_id": str(item.get("artist_id") or item.get("provider_id") or ""),
         "type": "artist",
         "name": str(item.get("name") or ""),
         "image_url": image_url,
+        "imageUrl": image_url,
         "image": {key: value for key, value in images.items() if value},
         "image_status": "verified" if image_url else "placeholder",
         "verified": bool(item.get("verified", False)),
@@ -54,7 +67,14 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         for index, name in enumerate(names)
     ]
     streams = (item.get("stream_urls") or {}).get("urls") or {}
+    # Catalog records may already be normalized and carry a single playable
+    # URL instead of the provider's quality map. Preserve it when present so
+    # album tracklists do not become metadata-only tracks.
+    direct_stream = item.get("stream_url") or item.get("streamUrl") or ""
     seconds = duration_seconds(item.get("duration"))
+    artwork_url = _image(item)
+    album_id = str(item.get("album_seokey") or item.get("album_id") or "")
+    album_title = str(item.get("album") or "")
     return {
         "id": str(item.get("seokey") or item.get("id") or ""),
         "provider_id": str(item.get("track_id") or item.get("provider_id") or ""),
@@ -63,17 +83,25 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         "artist": artists[0] if artists else None,
         "artists": artists,
         "album": {
-            "id": str(item.get("album_seokey") or item.get("album_id") or ""),
+            "id": album_id,
             "provider_id": str(item.get("album_id") or ""),
-            "name": str(item.get("album") or ""),
+            "name": album_title,
+            "title": album_title,
+            "artworkUrl": artwork_url,
             "type": "album",
-        } if item.get("album") else None,
-        "image_url": item.get("image_url") or _image(item),
+        } if album_id or album_title else None,
+        "image_url": artwork_url,
+        "artworkUrl": artwork_url,
         "duration_ms": seconds * 1000,
+        "durationMs": seconds * 1000,
+        "language": str(item.get("language") or ""),
+        "label": str(item.get("label") or ""),
+        "release_date": item.get("release_date") or None,
         "explicit": bool(item.get("is_explicit", False)),
         "stream_url": (
             streams.get("very_high_quality") or streams.get("high_quality")
-            or streams.get("medium_quality") or streams.get("low_quality") or None
+            or streams.get("medium_quality") or streams.get("low_quality")
+            or direct_stream or None
         ),
         "lyrics_url": f"/api/v1/tracks/{item.get('seokey')}/lyrics" if item.get("seokey") else None,
     }
@@ -82,22 +110,43 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
 def album(item: dict[str, Any]) -> dict[str, Any]:
     names = _csv(item.get("artists"))
     ids = _csv(item.get("artist_seokeys") or item.get("artist_ids"))
+    title = str(item.get("title") or item.get("name") or "")
+    artwork_url = _image(item)
+    release_date = item.get("release_date") or None
+    release_year = None
+    if release_date:
+        try:
+            release_year = int(str(release_date)[:4])
+        except ValueError:
+            release_year = None
+    artist_values = [
+        {"id": ids[index] if index < len(ids) else "", "name": name, "type": "artist"}
+        for index, name in enumerate(names)
+    ]
+    track_count = _int(item.get("track_count") or item.get("song_count"))
     data = {
         "id": str(item.get("seokey") or item.get("id") or ""),
         "provider_id": str(item.get("album_id") or item.get("provider_id") or ""),
         "type": "album",
-        "name": str(item.get("title") or item.get("name") or ""),
-        "image_url": item.get("image_url") or _image(item),
-        "artists": [
-            {"id": ids[index] if index < len(ids) else "", "name": name, "type": "artist"}
-            for index, name in enumerate(names)
-        ],
-        "release_date": item.get("release_date") or None,
-        "song_count": _int(item.get("track_count") or item.get("song_count")),
+        "name": title,
+        "title": title,
+        "image_url": artwork_url,
+        "imageUrl": artwork_url,
+        "artworkUrl": artwork_url,
+        "artists": artist_values,
+        "artistNames": names,
+        "artistIds": ids,
+        "release_date": release_date,
+        "releaseYear": release_year,
+        "language": str(item.get("language") or ""),
+        "label": str(item.get("label") or ""),
+        "song_count": track_count,
+        "trackCount": track_count,
     }
     if "tracks" in item:
         tracks = item.get("tracks") if isinstance(item.get("tracks"), list) else []
         data["songs"] = [song(track) for track in tracks if isinstance(track, dict)]
+        data["tracks"] = data["songs"]
     return data
 
 

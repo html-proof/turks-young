@@ -61,17 +61,13 @@ class Albums:
         data['album_id'] = album.get('album_id', '')
         data['title'] = album.get('title', '')
         try:
-            data['artists'] = await functions.findArtistNames(
-                album.get('artist') or []
-            )
-            tracks = results.get('tracks')
-            first_track_artist = (
-                tracks[0].get('artist') or []
-                if tracks and isinstance(tracks, list) and len(tracks) > 0
-                else []
-            )
-            data['artist_seokeys'] = await functions.findArtistSeoKeys(first_track_artist)
-            data['artist_ids'] = await functions.findArtistIds(first_track_artist)
+            # Resolve names and IDs from the same provider collection. Mixing
+            # album-level names with first-track IDs silently associated the
+            # wrong profile with several compilation albums.
+            album_artists = album.get('artist') or []
+            data['artists'] = await functions.findArtistNames(album_artists)
+            data['artist_seokeys'] = await functions.findArtistSeoKeys(album_artists)
+            data['artist_ids'] = await functions.findArtistIds(album_artists)
         except (KeyError, IndexError):
             data['artists'] = ""
             data['artist_seokeys'] = ""

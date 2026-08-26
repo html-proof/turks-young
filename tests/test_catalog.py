@@ -8,6 +8,7 @@ import pytest
 from api.catalog.normalize import album, artist, song
 from api.catalog.service import CatalogService, LanguageCatalog
 from api.cache.redis_cache import RedisCache
+from api.catalog.search.ranking import rank
 
 
 class FakeCatalog:
@@ -33,6 +34,10 @@ class FakeCatalog:
             "tracks": [],
             "albums": [{"seokey": "new-album", "title": "New Album"}],
         })
+        self.get_artist_info = AsyncMock(return_value=[{
+            "seokey": "artist-from-song", "artist_id": "91", "name": "Artist From Song",
+            "images": {"urls": {"large_artwork": "https://images.test/resolved.jpg"}},
+        }])
 
 
 class FakeHomeRepository:
@@ -86,9 +91,42 @@ def test_canonical_models_keep_types_and_provider_images():
 
     assert artist(raw_artist)["type"] == "artist"
     assert artist(raw_artist)["image_url"] == "https://images.test/a.jpg"
+    assert artist(raw_artist)["imageUrl"] == "https://images.test/a.jpg"
     assert song(raw_song)["type"] == "song"
     assert song(raw_song)["duration_ms"] == 215_000
+    assert song({**raw_song, "language": "Tamil"})["language"] == "Tamil"
     assert album(raw_album)["type"] == "album"
+    assert album(raw_album)["title"] == "Album One"
+    assert album(raw_album)["artistNames"] == ["Artist One"]
+    assert album(raw_album)["artworkUrl"] is None
+
+
+def test_artist_image_provider_aliases_are_normalized():
+    for field in ("image", "image_url", "imageUrl", "thumbnail", "photo", "artist_image"):
+        value = artist({"id": "artist-one", "name": "Artist One", field: "https://images.test/a.jpg"})
+        assert value["imageUrl"] == "https://images.test/a.jpg"
+
+
+def test_search_prefers_real_word_matches_over_fuzzy_neighbours():
+    values = [
+        {"id": "wrong", "type": "song", "title": "Chennai Pattanam"},
+        {"id": "right", "type": "song", "title": "Pattampoochi Pattalam"},
+    ]
+
+    results = rank("pattalam", values, "song", 10)
+
+    assert [item["id"] for item in results] == ["right"]
+
+
+def test_movie_search_keeps_tamil_soundtrack_album_with_same_title():
+    values = [
+        {"id": "sarkar-hindi", "type": "album", "name": "Sarkar", "language": "Hindi"},
+        {"id": "sarkar-tamil", "type": "album", "name": "Sarkar (Tamil) (Original Motion Picture Soundtrack)", "language": "Tamil"},
+    ]
+
+    results = rank("sarkar", values, "album", 10)
+
+    assert {item["id"] for item in results} == {"sarkar-hindi", "sarkar-tamil"}
 
 
 @pytest.mark.asyncio
@@ -131,6 +169,23 @@ async def test_artist_onboarding_uses_configured_language_and_provider_image():
     catalog.search_artists.assert_awaited_once_with("Language One", 11)
     assert values[0]["id"] == "artist-one"
     assert values[0]["image_url"] == "https://images.test/artist.jpg"
+
+
+@pytest.mark.asyncio
+async def test_artist_onboarding_resolves_images_for_song_only_artists():
+    catalog = FakeCatalog()
+    catalog.search_artists = AsyncMock(return_value=[])
+    catalog.get_trending = AsyncMock(return_value=[{
+        "seokey": "track-one", "title": "Track One", "artists": "Artist From Song",
+        "artist_seokeys": "artist-from-song",
+    }])
+    service = CatalogService(catalog, configured_languages())
+
+    values = await service.artists_for_languages(["language-one"], 10)
+
+    assert values[0]["id"] == "artist-from-song"
+    assert values[0]["imageUrl"] == "https://images.test/resolved.jpg"
+    catalog.get_artist_info.assert_awaited()
 
 
 @pytest.mark.asyncio
