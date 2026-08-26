@@ -1,12 +1,14 @@
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 
 from api.auth import AuthenticatedUser, get_current_user
 from api.catalog.models import IdSelection, RecentSearchCreate, envelope
+from api.core.home_state import HOME_STALE, coalesce
 from api.personalization.models import OnboardingUpdate
 from api.personalization.routes import get_personalization_service, get_user_repository
+from api.core import config
 
 
 router = APIRouter(prefix="/api", tags=["Music Hub Catalog"])
@@ -20,36 +22,56 @@ def _service(request: Request):
 
 
 @router.get("/languages", summary="List backend-configured onboarding languages.")
-async def languages(request: Request):
+async def languages(request: Request, response: Response):
     service = _service(request)
     values = [value.model_dump(mode="json") for value in service.languages.languages]
-    return envelope({"items": values}, count=len(values))
+    cache = getattr(request.app.state, "cache", None)
+    key = "music:languages:v1"
+    if cache and hasattr(cache, "get_or_set"):
+        data = await cache.get_or_set(key, lambda: _language_payload(values), config.TTL_LANGUAGES, config.STALE_CACHE_TTL)
+    else:
+        data = _language_payload(values)
+    payload = envelope(data, count=len(data["items"]))
+    response.headers["Cache-Control"] = f"public, max-age={config.TTL_LANGUAGES}, stale-while-revalidate={config.STALE_CACHE_TTL}"
+    return payload
+
+
+def _language_payload(values):
+    return {"items": values}
 
 
 @router.get("/artists", summary="List artists relevant to selected languages.")
 async def relevant_artists(
     request: Request,
-    languages: str = Query(..., min_length=1, max_length=500),
+    languages: str | None = Query(None, min_length=1, max_length=500),
+    language_ids: str | None = Query(None, min_length=1, max_length=500),
     limit: int = Query(30, ge=1, le=50),
+    cursor: str | None = Query(None, max_length=100),
 ):
-    ids = list(dict.fromkeys(item.strip() for item in languages.split(",") if item.strip()))
+    raw_languages = languages or language_ids
+    if not raw_languages:
+        raise HTTPException(status_code=422, detail="languages or language_ids is required")
+    ids = list(dict.fromkeys(item.strip() for item in raw_languages.split(",") if item.strip()))
     configured = _service(request).languages
-    unknown = [item for item in ids if item not in configured.by_id]
+    normalized_ids = configured.normalize_ids(ids)
+    unknown = [item for item in ids if not configured.resolve([item])]
     if unknown:
         raise HTTPException(status_code=422, detail={"unknown_language_ids": unknown})
-    values = await _service(request).artists_for_languages(ids, limit)
-    return envelope({"items": values}, count=len(values), language_ids=ids)
+    result = await _service(request).artist_page(normalized_ids, limit, cursor)
+    return envelope(result, count=len(result["items"]), language_ids=result["language_ids"])
 
 
 @router.get("/search", summary="Search the catalog with separated result types.")
 async def search(
     request: Request,
     q: str = Query(..., min_length=1, max_length=200),
-    type: Literal["song", "artist", "album", "playlist"] | None = None,
+    type: Literal["song", "track", "artist", "album", "playlist"] | None = None,
+    kind: Literal["song", "track", "artist", "album", "playlist"] | None = None,
     page: int = Query(1, ge=1, le=1000),
     limit: int = Query(20, ge=1, le=50),
 ):
-    result = await _service(request).search(q.strip(), type, page, limit)
+    requested_type = type if type is not None else kind
+    result = await _service(request).search(q.strip(), "song" if requested_type == "track" else requested_type, page, limit)
     return envelope(result, query=q.strip())
 
 
@@ -110,18 +132,13 @@ async def save_languages(
     if selection.language_ids is None:
         raise HTTPException(status_code=422, detail="language_ids is required")
     configured = _service(request).languages
-    unknown = [item for item in selection.language_ids if item not in configured.by_id]
+    unknown = [item for item in selection.language_ids if not configured.resolve([item])]
     if unknown:
         raise HTTPException(status_code=422, detail={"unknown_language_ids": unknown})
-    names = [configured.by_id[item].name for item in selection.language_ids]
-    await repository.update_profile(
-        user.uid, {"languages": names, "language_ids": selection.language_ids}
-    )
-    state = await repository.update_onboarding(
-        user.uid,
-        OnboardingUpdate(step="artist", completed=False),
-    )
-    return envelope(state)
+    normalized_ids = configured.normalize_ids(selection.language_ids)
+    names = [configured.by_id[item].name for item in normalized_ids]
+    await repository.replace_language_preferences(user.uid, normalized_ids, names)
+    return envelope(await repository.get_onboarding(user.uid))
 
 
 @router.put("/me/preferences/artists", summary="Persist selected backend artist IDs.")
@@ -144,40 +161,52 @@ async def save_artists(
                     names[item["seokey"]] = item["name"]
     except Exception:
         pass
-    await repository.update_profile(
-        user.uid,
-        {
-            "favorite_artist_ids": selection.artist_ids,
-            "favorite_artists": [names.get(sid, "") for sid in selection.artist_ids],
-        },
+    await repository.replace_selected_artists(
+        user.uid, selection.artist_ids, [names.get(sid, "") for sid in selection.artist_ids]
     )
-    state = await repository.update_onboarding(
-        user.uid,
-        OnboardingUpdate(step="complete", completed=True),
-    )
-    return envelope(state)
+    return envelope(await repository.get_onboarding(user.uid))
 
 
 @router.get("/home", summary="Get a personalized, backend-composed home feed.")
 async def home(
     request: Request,
     refresh: bool = False,
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(24, ge=1, le=50),
+    cursor: str | None = Query(None, max_length=100),
+    type: str = Query("all", pattern="^(all|song|album|artist|playlist)$"),
     user: AuthenticatedUser = Depends(get_current_user),
     repository=Depends(get_user_repository),
     recommendations=Depends(get_personalization_service),
 ):
     cache = getattr(request.app.state, "cache", None)
-    key = f"home:{user.uid}:{limit}"
+    key = f"home:{user.uid}:{type}:{limit}:{cursor or '0'}"
     if cache and not refresh:
         cached = await cache.get(key)
         if cached is not None:
             return envelope(cached, cached=True)
-    sections = await _service(request).home(user.uid, repository, recommendations, limit)
-    data = {"sections": sections}
-    if cache:
-        await cache.set(key, data, 300)
-    return envelope(data, cached=False)
+    try:
+        offset = int(cursor or "0")
+        if offset < 0:
+            raise ValueError
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="cursor must be a non-negative offset") from exc
+
+    async def build():
+        return await _service(request).home_page(
+            user.uid, repository, recommendations, limit, offset, type
+        )
+
+    try:
+        data = await coalesce(key, build)
+        HOME_STALE[key] = data
+        if cache:
+            await cache.set(key, data, 300)
+        return envelope(data, cached=False)
+    except Exception:
+        stale = HOME_STALE.get(key)
+        if stale is not None:
+            return envelope(stale, cached=True, stale=True)
+        raise
 
 
 @router.get("/me/recent-searches", summary="List synchronized recent searches.")

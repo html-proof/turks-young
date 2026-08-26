@@ -74,7 +74,7 @@ across search, home, onboarding, artist, and album responses.
 | `GET /api/artists?languages=id1,id2` | Provider artists relevant to selected languages |
 | `PUT /api/me/preferences/languages` | Persist validated language IDs |
 | `PUT /api/me/preferences/artists` | Persist validated artist IDs and complete onboarding |
-| `GET /api/home` | Personalized non-empty dynamic sections |
+| `GET /api/home?type=all&limit=24&cursor=...` | Personalized typed, paginated home sections |
 | `GET /api/home?refresh=true` | Refresh and replace the cached home response |
 | `GET /api/search?q=...` | Categorized All results |
 | `GET /api/search?q=...&type=song&page=1&limit=20` | Typed pagination |
@@ -87,3 +87,8 @@ across search, home, onboarding, artist, and album responses.
 `native_name`, and optional `image_url`. No language is selected or invented
 when this setting is empty. Apply Supabase migration
 `20260826000003_backend_driven_catalog.sql` before deploying these endpoints.
+
+Home feed pages return `sections`, `next_cursor`, `has_more`, and `content_type`.
+Supported types are `all`, `song`, `album`, `artist`, and `playlist`. Cached
+content is served while stale data is revalidated, and concurrent requests for
+the same page are coalesced per API worker.

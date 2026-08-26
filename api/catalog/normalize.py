@@ -14,6 +14,15 @@ def _image(item: dict[str, Any]) -> str | None:
     return urls.get("large_artwork") or urls.get("medium_artwork") or urls.get("small_artwork") or None
 
 
+def _images(item: dict[str, Any]) -> dict[str, str]:
+    urls = (item.get("images") or {}).get("urls") or {}
+    return {
+        "small": urls.get("small_artwork") or "",
+        "medium": urls.get("medium_artwork") or "",
+        "large": urls.get("large_artwork") or "",
+    }
+
+
 def _int(value: Any) -> int:
     try:
         return int(float(str(value or 0).replace(",", "")))
@@ -22,12 +31,16 @@ def _int(value: Any) -> int:
 
 
 def artist(item: dict[str, Any]) -> dict[str, Any]:
+    images = _images(item)
+    image_url = item.get("image_url") or images["large"] or images["medium"] or images["small"]
     return {
         "id": str(item.get("seokey") or item.get("id") or ""),
         "provider_id": str(item.get("artist_id") or item.get("provider_id") or ""),
         "type": "artist",
         "name": str(item.get("name") or ""),
-        "image_url": item.get("image_url") or _image(item),
+        "image_url": image_url,
+        "image": {key: value for key, value in images.items() if value},
+        "image_status": "verified" if image_url else "placeholder",
         "verified": bool(item.get("verified", False)),
         "followers_count": _int(item.get("favorite_count") or item.get("followers_count")),
     }

@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 
-from api.auth import AuthenticatedUser, get_current_user
+from api.auth import AuthenticatedUser, account_error, get_current_user
 from api.firebase import FirebaseRuntime
 from api.personalization.models import (
     AlbumSnapshot,
@@ -39,7 +39,14 @@ async def get_user_repository(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database is unavailable",
         )
-    await repository.ensure_user(user)
+    # Never provision accounts as a side effect of a protected read/write.
+    # Account creation belongs to the authentication exchange only.
+    account = await repository.get_account(user.uid)
+    if account is None:
+        raise account_error("ACCOUNT_NOT_FOUND", "This account is no longer available.")
+    if account["account_status"] != "active":
+        code = "ACCOUNT_DELETED" if account["account_status"] == "deleted" else "ACCOUNT_UNAVAILABLE"
+        raise account_error(code, "This account is no longer available.")
     return repository
 
 
@@ -537,7 +544,7 @@ async def get_player_session(
 ) -> dict[str, Any]:
     session = await repository.get_player_session(user.uid)
     if session is None:
-        return {"track": None, "queue": [], "position_ms": 0, "playing": False, "device_id": None}
+        return {"track": None, "queue": [], "position_ms": 0, "playing": False, "repeat_mode": "off", "shuffle_enabled": False, "duration_ms": 0, "device_id": None}
     return session
 
 

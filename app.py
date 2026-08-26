@@ -3,6 +3,7 @@ import logging.config
 import os
 import re
 import uuid
+import time
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
@@ -25,8 +26,10 @@ from api.lyrics.service import LyricsService
 from api.personalization.repository import PostgresUserRepository
 from api.personalization.routes import router as personalization_router
 from api.personalization.routes import users_router
-from api.pulse.routes import router as pulse_router
+from api.personalization.v1_routes import router as v1_personalization_router
+from api.pulse.routes import router as pulse_router, api_router as personalized_pulse_router
 from api.personalization.service import PersonalizedMusicService
+from api.core.performance import record as record_performance
 
 # ---------------------------------------------------------------------------
 # Structured logging
@@ -56,8 +59,10 @@ app = FastAPI(title="GaanaPy", version="1.0")
 app.include_router(personalization_router)
 app.include_router(users_router)
 app.include_router(pulse_router)
+app.include_router(personalized_pulse_router)
 app.include_router(lyrics_router)
 app.include_router(catalog_router)
+app.include_router(v1_personalization_router)
 
 cors_origins = [
     o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()
@@ -85,13 +90,18 @@ async def request_id_middleware(request: Request, call_next):
 # ---------------------------------------------------------------------------
 @app.middleware("http")
 async def access_log_middleware(request: Request, call_next):
+    started = time.perf_counter()
     response = await call_next(request)
+    duration_ms = (time.perf_counter() - started) * 1000
     rid = getattr(request.state, "request_id", "-")
+    record_performance(request.url.path, duration_ms)
+    response.headers["Server-Timing"] = f"app;dur={duration_ms:.1f}"
     logger.info(
-        '"method":"%s","path":"%s","status":%d,"request_id":"%s"',
+        '"method":"%s","path":"%s","status":%d,"duration_ms":%.1f,"request_id":"%s"',
         request.method,
         request.url.path,
         response.status_code,
+        duration_ms,
         rid,
     )
     return response
@@ -152,6 +162,7 @@ async def startup_event():
     cache = RedisCache(config.UPSTASH_REDIS_REST_URL, config.UPSTASH_REDIS_REST_TOKEN)
     await cache.connect()
     app.state.cache = cache
+    app.state.catalog_service.cache = cache
 
     firebase_runtime.initialize()  # still needed for JWT verification
 
@@ -228,12 +239,12 @@ def _cache(request: Request) -> RedisCache:
     return request.app.state.cache
 
 
-async def _cached(cache: RedisCache, key: str, ttl: int, coro):
+async def _cached(cache: RedisCache, key: str, ttl: int, loader):
     """Return cached value when present, otherwise await coro, cache result, and return."""
     hit = await cache.get(key)
     if hit is not None:
         return hit
-    result = await coro
+    result = await loader()
     if not (isinstance(result, dict) and "error" in result):
         await cache.set(key, result, ttl)
     return result
@@ -275,7 +286,7 @@ async def songs_search(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"songs:search:{query}:{limit}"
-    result = await _cached(cache, key, config.TTL_SEARCH, gaana.search_songs(query, limit))
+    result = await _cached(cache, key, config.TTL_SEARCH, lambda: gaana.search_songs(query, limit))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -284,12 +295,20 @@ async def songs_search(
 @app.get("/songs/info/", summary="Retrieve detailed information on a song.")
 async def songs_info(
     request: Request,
-    seokey: str = Depends(validate_seokey),
+    seokey: Optional[str] = Query(None, min_length=1, max_length=MAX_SEOKEY_LENGTH, pattern=SEO_KEY_BASE_PATTERN),
+    query: Optional[str] = Query(None, min_length=1, max_length=MAX_SEOKEY_LENGTH, pattern=SEO_KEY_BASE_PATTERN),
 ):
+    # Older clients used `query`; keep it as a compatible alias for the
+    # provider's seokey without weakening the validation rules.
+    seokey = seokey or query
+    if not seokey:
+        raise HTTPException(status_code=422, detail="seokey or query is required")
+    if not re.search(r"[a-zA-Z]", seokey):
+        raise HTTPException(status_code=400, detail="seokey must contain at least one alphabetic character")
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"songs:info:{seokey}"
-    result = await _cached(cache, key, config.TTL_SONG, gaana.get_track_info([seokey]))
+    result = await _cached(cache, key, config.TTL_SONG, lambda: gaana.get_track_info([seokey]))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -306,7 +325,7 @@ async def albums_search(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"albums:search:{query}:{limit}"
-    result = await _cached(cache, key, config.TTL_SEARCH, gaana.search_albums(query, limit))
+    result = await _cached(cache, key, config.TTL_SEARCH, lambda: gaana.search_albums(query, limit))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -320,7 +339,7 @@ async def albums_info(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"albums:info:{seokey}"
-    result = await _cached(cache, key, config.TTL_ALBUM, gaana.get_album_info([seokey], True))
+    result = await _cached(cache, key, config.TTL_ALBUM, lambda: gaana.get_album_info([seokey], True))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -335,7 +354,7 @@ async def albums_similar(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"albums:similar:{album_id}:{limit}"
-    result = await _cached(cache, key, config.TTL_SIMILAR, gaana.get_similar_albums(album_id, limit))
+    result = await _cached(cache, key, config.TTL_SIMILAR, lambda: gaana.get_similar_albums(album_id, limit))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -352,7 +371,7 @@ async def artists_search(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"artists:search:{query}:{limit}"
-    result = await _cached(cache, key, config.TTL_SEARCH, gaana.search_artists(query, limit))
+    result = await _cached(cache, key, config.TTL_SEARCH, lambda: gaana.search_artists(query, limit))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -368,7 +387,7 @@ async def artists_info(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"artists:info:{seokey}:{limit}:{page}"
-    result = await _cached(cache, key, config.TTL_ARTIST, gaana.get_artist_info([seokey], True, limit, page))
+    result = await _cached(cache, key, config.TTL_ARTIST, lambda: gaana.get_artist_info([seokey], True, limit, page))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -383,7 +402,7 @@ async def artists_similar(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"artists:similar:{artist_id}:{limit}"
-    result = await _cached(cache, key, config.TTL_SIMILAR, gaana.get_similar_artists(artist_id, limit))
+    result = await _cached(cache, key, config.TTL_SIMILAR, lambda: gaana.get_similar_artists(artist_id, limit))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -399,7 +418,7 @@ async def artists_tracks(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"artists:tracks:{artist_id}:{limit}:{page}"
-    result = await _cached(cache, key, config.TTL_ARTIST, gaana.get_artist_tracks(artist_id, limit, page))
+    result = await _cached(cache, key, config.TTL_ARTIST, lambda: gaana.get_artist_tracks(artist_id, limit, page))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -416,7 +435,7 @@ async def get_trending(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"trending:{language.lower()}:{limit}"
-    result = await _cached(cache, key, config.TTL_TRENDING, gaana.get_trending(language, limit))
+    result = await _cached(cache, key, config.TTL_TRENDING, lambda: gaana.get_trending(language, limit))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -431,7 +450,7 @@ async def get_new_releases(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"newreleases:{language.lower()}:{limit}"
-    result = await _cached(cache, key, config.TTL_NEW_RELEASES, gaana.get_new_releases(language, limit))
+    result = await _cached(cache, key, config.TTL_NEW_RELEASES, lambda: gaana.get_new_releases(language, limit))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -445,7 +464,7 @@ async def get_charts(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"charts:{limit}"
-    result = await _cached(cache, key, config.TTL_CHARTS, gaana.get_charts(limit))
+    result = await _cached(cache, key, config.TTL_CHARTS, lambda: gaana.get_charts(limit))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -462,7 +481,7 @@ async def playlists_search(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"playlists:search:{query}:{limit}"
-    result = await _cached(cache, key, config.TTL_SEARCH, gaana.search_playlists(query, limit))
+    result = await _cached(cache, key, config.TTL_SEARCH, lambda: gaana.search_playlists(query, limit))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -476,7 +495,7 @@ async def playlists_info(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"playlists:info:{seokey}"
-    result = await _cached(cache, key, config.TTL_PLAYLIST, gaana.get_playlist_info(seokey))
+    result = await _cached(cache, key, config.TTL_PLAYLIST, lambda: gaana.get_playlist_info(seokey))
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result

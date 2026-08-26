@@ -1,10 +1,13 @@
 import json
+import asyncio
+import time
 from unittest.mock import AsyncMock
 
 import pytest
 
 from api.catalog.normalize import album, artist, song
 from api.catalog.service import CatalogService, LanguageCatalog
+from api.cache.redis_cache import RedisCache
 
 
 class FakeCatalog:
@@ -30,6 +33,22 @@ class FakeCatalog:
             "tracks": [],
             "albums": [{"seokey": "new-album", "title": "New Album"}],
         })
+
+
+class FakeHomeRepository:
+    async def get_profile(self, uid): return {"language_ids": []}
+    async def list_history(self, uid, limit): return [
+        {"seokey": "song-1", "title": "Song One", "artists": "Artist One"},
+        {"seokey": "song-2", "title": "Song Two", "artists": "Artist Two"},
+    ][:limit]
+    async def list_favorites(self, uid): return []
+    async def list_saved_albums(self, uid): return [{"seokey": "album-1", "title": "Album One"}]
+    async def list_followed_artists(self, uid): return [{"seokey": "artist-1", "name": "Artist One"}]
+    async def list_playlists(self, uid): return [{"seokey": "playlist-1", "name": "Playlist One"}]
+
+
+class FakeRecommendations:
+    async def recommendations(self, uid, catalog, limit): return []
 
 
 def configured_languages():
@@ -123,3 +142,81 @@ async def test_discovery_reads_nested_new_release_albums():
 
     releases = next(section for section in sections if section["id"] == "new_releases")
     assert releases["items"][0]["id"] == "new-album"
+
+
+@pytest.mark.asyncio
+async def test_artist_languages_are_fetched_concurrently_and_cached_per_language():
+    languages = LanguageCatalog.from_json(json.dumps([
+        {"id": name.lower(), "name": name, "native_name": name}
+        for name in ("Hindi", "Tamil", "Malayalam", "English")
+    ]))
+
+    class SlowCatalog(FakeCatalog):
+        def __init__(self):
+            super().__init__()
+            for attr in ("get_trending", "search_artists", "search_songs"):
+                delattr(self, attr)
+            self.calls = 0
+
+        async def get_trending(self, language, limit):
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return []
+
+        async def search_artists(self, query, limit):
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return [{"seokey": f"{query.lower()}-artist", "name": query}]
+
+        async def search_songs(self, query, limit):
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return []
+
+    catalog = SlowCatalog()
+    cache = RedisCache("", "")
+    service = CatalogService(catalog, languages, cache)
+    started = time.perf_counter()
+    first = await service.artists_for_languages(["hindi", "tamil", "malayalam", "english"], 10)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.25  # four language groups run in parallel, not 4 x 150 ms
+    assert len(first) == 4
+    assert catalog.calls == 12
+
+    await service.artists_for_languages(["hindi", "tamil", "malayalam", "english"], 10)
+    assert catalog.calls == 12
+
+
+@pytest.mark.asyncio
+async def test_cache_coalesces_concurrent_misses():
+    cache = RedisCache("", "")
+    calls = 0
+
+    async def loader():
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)
+        return {"ok": True}
+
+    values = await asyncio.gather(*[
+        cache.get_or_set("same-key", loader, 60) for _ in range(20)
+    ])
+    assert calls == 1
+    assert all(value == {"ok": True} for value in values)
+
+
+@pytest.mark.asyncio
+async def test_home_page_filters_typed_content_and_paginates():
+    service = CatalogService(FakeCatalog(), configured_languages())
+    repository = FakeHomeRepository()
+    recommendations = FakeRecommendations()
+
+    albums = await service.home_page("u1", repository, recommendations, 1, 0, "album")
+    assert albums["content_type"] == "album"
+    assert albums["sections"][0]["items"][0]["type"] == "album"
+    assert albums["sections"][0]["items"][0]["id"] == "album-1"
+
+    songs = await service.home_page("u1", repository, recommendations, 1, 0, "song")
+    assert all(item["type"] == "song" for section in songs["sections"] for item in section["items"])
+    assert songs["has_more"] is True
+    assert songs["next_cursor"] == "1"

@@ -1,6 +1,7 @@
 const TTL_RULES = [
   [/^\/me(?:\/|$)/, 0],
   [/^\/api\/(?:me|home)(?:\/|$)/, 0],
+  [/^\/api\/pulse(?:\/|$)/, 0],
   [/^\/(health|ready)\/?$/, 0],
   [/^\/trending\b/, 600],
   [/^\/charts\b/, 600],

@@ -21,6 +21,11 @@ class AuthenticatedUser(BaseModel):
     provider: str | None = None
 
 
+def account_error(code: str, message: str, status_code: int = status.HTTP_401_UNAUTHORIZED) -> HTTPException:
+    """Return the stable error shape consumed by the client auth interceptor."""
+    return HTTPException(status_code=status_code, detail={"error": {"code": code, "message": message}})
+
+
 def get_firebase_runtime(request: Request) -> FirebaseRuntime:
     runtime = getattr(request.app.state, "firebase", None)
     if not runtime or not runtime.enabled:

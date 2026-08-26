@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import aiohttp
 from api.songs.songs import Songs
 from api.albums.albums import Albums
@@ -55,7 +56,8 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
 
         for attempt in range(config.UPSTREAM_MAX_RETRIES + 1):
             if attempt > 0:
-                await asyncio.sleep(delays[min(attempt - 1, len(delays) - 1)])
+                base = delays[min(attempt - 1, len(delays) - 1)]
+                await asyncio.sleep(base + random.uniform(0, base * 0.25))
 
             try:
                 return await self._circuit_breaker.call(
@@ -64,6 +66,14 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
             except CircuitOpenError:
                 logger.warning("upstream circuit open url=%s", url)
                 return await self.errors.no_results()
+            except aiohttp.ClientResponseError as exc:
+                # Authentication, missing resources, and malformed requests
+                # are deterministic and must not be retried as network loss.
+                if exc.status not in {408, 429, 500, 502, 503, 504}:
+                    logger.info("upstream non-retryable status=%s url=%s", exc.status, url)
+                    return await self.errors.no_results()
+                last_exc = exc
+                logger.warning("upstream retryable status=%s attempt=%d/%d url=%s", exc.status, attempt + 1, config.UPSTREAM_MAX_RETRIES + 1, url)
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as exc:
                 last_exc = exc
                 logger.warning(

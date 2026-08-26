@@ -11,6 +11,7 @@ from api.personalization.repository import PostgresUserRepository
 
 
 router = APIRouter(prefix="/pulse", tags=["Pulse"])
+api_router = APIRouter(prefix="/api", tags=["Personalized Pulse"])
 
 
 def _repo(request: Request) -> PostgresUserRepository:
@@ -22,6 +23,45 @@ def _repo(request: Request) -> PostgresUserRepository:
 
 def _firebase(request: Request) -> FirebaseRuntime:
     return request.app.state.firebase
+
+
+@api_router.get("/pulse", summary="Get the authenticated user's personalized Pulse feed.")
+async def personalized_feed(
+    request: Request,
+    limit: int = Query(20, ge=1, le=50),
+    cursor: str | None = Query(None, max_length=200),
+    refresh: bool = Query(False),
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    repo = _repo(request)
+    account = await repo.get_account(user.uid)
+    if not account or account.get("account_status") != "active":
+        raise HTTPException(status_code=401, detail="Account is unavailable")
+    cache = getattr(request.app.state, "cache", None)
+    key = f"pulse:user:{user.uid}:{limit}:{cursor or '0'}"
+    if cache and not refresh:
+        cached = await cache.get(key)
+        if cached is not None:
+            return {**cached, "cached": True}
+    try:
+        data = await repo.get_personalized_pulse(user.uid, limit, cursor)
+        if cache:
+            await cache.set_with_stale(key, data, 120, 900)
+        return {**data, "cached": False}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@api_router.post("/pulse/{item_id}/state", summary="Update a Pulse item's read state.")
+async def update_pulse_state(
+    item_id: UUID,
+    request: Request,
+    state: str = Query(..., pattern="^(seen|opened|read)$"),
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, bool]:
+    if not await _repo(request).mark_pulse_state(user.uid, item_id, state):
+        raise HTTPException(status_code=404, detail="Pulse item not found")
+    return {"updated": True}
 
 
 async def _notify(

@@ -30,6 +30,10 @@ TTL_CHARTS       = int(os.getenv("TTL_CHARTS",       "600"))
 TTL_TRENDING     = int(os.getenv("TTL_TRENDING",     "600"))
 TTL_NEW_RELEASES = int(os.getenv("TTL_NEW_RELEASES", "900"))
 TTL_SIMILAR      = int(os.getenv("TTL_SIMILAR",      "3600"))
+TTL_LANGUAGES    = int(os.getenv("TTL_LANGUAGES",    "43200"))
+TTL_ARTIST_DISCOVERY = int(os.getenv("TTL_ARTIST_DISCOVERY", "3600"))
+TTL_DISCOVER     = int(os.getenv("TTL_DISCOVER",     "900"))
+STALE_CACHE_TTL  = int(os.getenv("STALE_CACHE_TTL",  "3600"))
 
 # ── Lyrics ────────────────────────────────────────────────────────────────────
 LYRICS_PROVIDER = os.getenv("LYRICS_PROVIDER", "lrclib")

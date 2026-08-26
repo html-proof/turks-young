@@ -35,6 +35,18 @@ class ProfileUpdate(BaseModel):
     favorite_genres: list[str] | None = Field(default=None, max_length=20)
     favorite_artists: list[str] | None = Field(default=None, max_length=30)
     onboarding_completed: bool | None = None
+    streaming_quality_wifi: str | None = Field(default=None, max_length=20)
+    streaming_quality_mobile: str | None = Field(default=None, max_length=20)
+    download_quality: str | None = Field(default=None, max_length=20)
+    data_saver_enabled: bool | None = None
+    autoplay_enabled: bool | None = None
+    push_notifications_enabled: bool | None = None
+    pulse_followed_releases_enabled: bool | None = None
+    pulse_selected_releases_enabled: bool | None = None
+    pulse_trending_enabled: bool | None = None
+    pulse_recommendations_enabled: bool | None = None
+    explicit_content_enabled: bool | None = None
+    equalizer_preset: str | None = Field(default=None, max_length=30)
 
     @field_validator("languages", "favorite_genres", "favorite_artists", mode="before")
     @classmethod
@@ -155,4 +167,39 @@ class PlayerSessionUpdate(BaseModel):
     queue: list[Any] = Field(default_factory=list)
     position_ms: int = Field(default=0, ge=0)
     playing: bool = False
+    repeat_mode: str = Field(default="off", pattern="^(off|one|all)$")
+    shuffle_enabled: bool = False
+    duration_ms: int = Field(default=0, ge=0)
     device_id: str | None = Field(default=None, max_length=200)
+
+
+class PreferenceIds(BaseModel):
+    """IDs submitted by onboarding/settings; identity comes from the token."""
+    language_ids: list[str] | None = Field(default=None, min_length=1, max_length=20)
+    artist_ids: list[str] | None = Field(default=None, min_length=1, max_length=50)
+
+    @field_validator("language_ids", "artist_ids")
+    @classmethod
+    def unique_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        result = list(dict.fromkeys(item.strip() for item in value if item.strip()))
+        if not result:
+            raise ValueError("At least one ID is required")
+        return result
+
+
+class RecommendationEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    event_type: str = Field(min_length=1, max_length=50)
+    song_id: str | None = Field(default=None, max_length=200)
+    artist_id: str | None = Field(default=None, max_length=200)
+    album_id: str | None = Field(default=None, max_length=200)
+    playlist_id: str | None = Field(default=None, max_length=200)
+    position_ms: int = Field(default=0, ge=0)
+    duration_ms: int = Field(default=0, ge=0)
+    source: str | None = Field(default=None, max_length=50)
+    context_id: str | None = Field(default=None, max_length=100)
+    query: str | None = Field(default=None, max_length=200)
+    payload: dict[str, Any] = Field(default_factory=dict)

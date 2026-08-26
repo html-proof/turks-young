@@ -6,6 +6,11 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT,
   photo_url    TEXT,
   provider     TEXT,
+  onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
+  onboarding_completed_at TIMESTAMPTZ,
+  account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active', 'disabled', 'suspended', 'deleted')),
+  deleted_at    TIMESTAMPTZ,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -19,6 +24,14 @@ CREATE TABLE IF NOT EXISTS user_profiles (
   favorite_artists TEXT[]  NOT NULL DEFAULT '{}',
   favorite_artist_ids TEXT[] NOT NULL DEFAULT '{}',
   onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
+  streaming_quality_wifi TEXT NOT NULL DEFAULT 'high',
+  streaming_quality_mobile TEXT NOT NULL DEFAULT 'normal',
+  download_quality TEXT NOT NULL DEFAULT 'high',
+  data_saver_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  autoplay_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  push_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  explicit_content_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  equalizer_preset TEXT NOT NULL DEFAULT 'Default',
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -147,12 +160,16 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(uid, is_read, created_at DESC);
 
+
 CREATE TABLE IF NOT EXISTS player_sessions (
   uid         TEXT    PRIMARY KEY REFERENCES users(uid) ON DELETE CASCADE,
   track       JSONB,
   queue       JSONB   NOT NULL DEFAULT '[]'::jsonb,
   position_ms BIGINT  NOT NULL DEFAULT 0,
   playing     BOOLEAN NOT NULL DEFAULT FALSE,
+  repeat_mode TEXT    NOT NULL DEFAULT 'off',
+  shuffle_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  duration_ms BIGINT NOT NULL DEFAULT 0,
   device_id   TEXT,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -1,17 +1,37 @@
 import asyncio
+import base64
 import json
+import logging
+import time
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
 from api.catalog.models import Language
 from api.catalog.normalize import album, artist, items, playlist, song
+from api.catalog.search.ranking import confidence, normalize_query, rank
+from api.core import config
+
+logger = logging.getLogger(__name__)
 
 
 class LanguageCatalog:
+    _STANDARD_CODES = {
+        "malayalam": "ml", "tamil": "ta", "hindi": "hi", "english": "en",
+        "telugu": "te", "kannada": "kn", "bengali": "bn", "punjabi": "pa",
+        "marathi": "mr", "gujarati": "gu", "odia": "or",
+    }
     def __init__(self, languages: list[Language]):
         self.languages = languages
         self.by_id = {language.id: language for language in languages}
+        self._aliases: dict[str, str] = {}
+        for language in languages:
+            values = {language.id, language.name, language.native_name}
+            self._aliases.update({normalize_query(value): language.id for value in values if value})
+            self._aliases[normalize_query(f"{language.name} songs")] = language.id
+            code = self._STANDARD_CODES.get(normalize_query(language.name))
+            if code:
+                self._aliases[code] = language.id
 
     @classmethod
     def from_json(cls, raw: str) -> "LanguageCatalog":
@@ -26,7 +46,17 @@ class LanguageCatalog:
         return cls(values)
 
     def resolve(self, ids: list[str]) -> list[Language]:
-        return [self.by_id[item] for item in ids if item in self.by_id]
+        resolved: list[Language] = []
+        seen: set[str] = set()
+        for value in ids:
+            language_id = self._aliases.get(normalize_query(value))
+            if language_id and language_id not in seen:
+                seen.add(language_id)
+                resolved.append(self.by_id[language_id])
+        return resolved
+
+    def normalize_ids(self, ids: list[str]) -> list[str]:
+        return [language.id for language in self.resolve(ids)]
 
 
 def _clean(result: Any) -> Any:
@@ -34,40 +64,97 @@ def _clean(result: Any) -> Any:
 
 
 class CatalogService:
-    def __init__(self, catalog: Any, languages: LanguageCatalog):
+    def __init__(self, catalog: Any, languages: LanguageCatalog, cache: Any | None = None):
         self.catalog = catalog
         self.languages = languages
+        self.cache = cache
+        self._local_tasks: dict[str, asyncio.Task] = {}
 
-    async def artists_for_languages(self, language_ids: list[str], limit: int) -> list[dict[str, Any]]:
+    async def _cached(self, key: str, ttl: int, loader, stale_ttl: int | None = None):
+        started = time.perf_counter()
+        if self.cache is not None and hasattr(self.cache, "get_or_set"):
+            value = await self.cache.get_or_set(key, loader, ttl, stale_ttl)
+        else:
+            value = await loader()
+        logger.info("catalog_timing key=%s total_ms=%.1f cache=%s", key, (time.perf_counter() - started) * 1000, bool(self.cache))
+        return value
+
+    async def _artist_candidates_for_language(self, language: Language, limit: int, artist_limit: int | None = None) -> list[dict[str, Any]]:
+        async def load():
+            return await asyncio.gather(
+                self.catalog.get_trending(language.name, limit),
+            # Preserve the provider's artist-search contract while the song
+            # and chart sources supply the broader discovery pool.
+            self.catalog.search_artists(language.name, artist_limit or limit),
+                self.catalog.search_songs(language.name, limit),
+                return_exceptions=True,
+            )
+        results = await self._cached(f"music:artists:{language.id}:v1", config.TTL_ARTIST_DISCOVERY, load, config.STALE_CACHE_TTL)
+        candidates: list[dict[str, Any]] = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("artist discovery failed language=%s error=%s", language.id, result)
+                continue
+            candidates.extend(items(_clean(result), "artist"))
+            for track in items(_clean(result), "song"):
+                candidates.extend(track.get("artists") or [])
+        return candidates
+
+    async def artist_page(self, language_ids: list[str], limit: int, cursor: str | None = None) -> dict[str, Any]:
         languages = self.languages.resolve(language_ids)
         if not languages:
-            return []
-        # Fetch trending songs per language; extract artist seokeys from those songs.
-        # Searching by language name yields 0 results (artist search is by name, not language).
-        songs_per_language = max(5, (limit // len(languages) + 1) * 3)
-        trending_results = await asyncio.gather(*[
-            self.catalog.get_trending(language.name, songs_per_language)
-            for language in languages
-        ], return_exceptions=True)
+            return {"items": [], "next_cursor": None, "has_more": False, "language_ids": []}
+        requested_offset = 0
+        if cursor:
+            try:
+                requested_offset = int(base64.urlsafe_b64decode(cursor.encode()).decode())
+            except (ValueError, UnicodeDecodeError, base64.binascii.Error):
+                requested_offset = 0
+        per_language = min(max(limit * 3, 60), 180)
+        language_results = await asyncio.gather(*[
+            self._artist_candidates_for_language(language, per_language, limit + 1) for language in languages
+        ])
+        buckets: list[list[dict[str, Any]]] = []
+        for language, values in zip(languages, language_results):
+            unique: dict[str, dict[str, Any]] = {}
+            for value in values:
+                key = str(value.get("id") or normalize_query(str(value.get("name") or "")))
+                if key and key not in unique:
+                    enriched = dict(value)
+                    enriched["languages"] = [language.id]
+                    unique[key] = enriched
+            buckets.append(list(unique.values()))
+        # Round-robin keeps one globally popular language from filling the page.
+        merged: list[dict[str, Any]] = []
         seen: set[str] = set()
-        artist_seokeys: list[str] = []
-        for result in trending_results:
-            if isinstance(result, Exception):
-                continue
-            for song_item in items(_clean(result), "song"):
-                for art in (song_item.get("artists") or []):
-                    seokey = art.get("id")
-                    if seokey and seokey not in seen:
-                        seen.add(seokey)
-                        artist_seokeys.append(seokey)
-        if not artist_seokeys:
-            return []
-        fetch_keys = artist_seokeys[: limit * 2]
-        artist_result = _clean(await self.catalog.get_artist_info(fetch_keys, False))
-        unique: dict[str, dict[str, Any]] = {}
-        for value in items(artist_result, "artist"):
-            unique.setdefault(value["id"], value)
-        return list(unique.values())[:limit]
+        index = 0
+        while True:
+            added = False
+            for bucket in buckets:
+                if index < len(bucket):
+                    value = bucket[index]
+                    key = str(value.get("id") or normalize_query(str(value.get("name") or "")))
+                    if key not in seen:
+                        seen.add(key)
+                        merged.append(value)
+                    else:
+                        existing = next(item for item in merged if str(item.get("id") or normalize_query(str(item.get("name") or ""))) == key)
+                        existing["languages"] = sorted(set(existing.get("languages", [])) | set(value.get("languages", [])))
+                    added = True
+            if not added:
+                break
+            index += 1
+        page = merged[requested_offset:requested_offset + limit]
+        # Candidate responses already include provider artwork. Avoid an extra
+        # per-page provider request on the onboarding critical path.
+        next_offset = requested_offset + len(page)
+        has_more = next_offset < len(merged)
+        next_cursor = base64.urlsafe_b64encode(str(next_offset).encode()).decode() if has_more else None
+        logger.info("artist_discovery languages=%s before=%d after=%d offset=%d", [l.id for l in languages], sum(map(len, language_results)), len(merged), requested_offset)
+        return {"items": page, "next_cursor": next_cursor, "has_more": has_more, "language_ids": [l.id for l in languages]}
+
+    async def artists_for_languages(self, language_ids: list[str], limit: int) -> list[dict[str, Any]]:
+        return (await self.artist_page(language_ids, limit))["items"]
 
     async def search(self, query: str, kind: str | None, page: int, limit: int) -> dict[str, Any]:
         methods = {
@@ -76,10 +163,13 @@ class CatalogService:
             "album": self.catalog.search_albums,
             "playlist": self.catalog.search_playlists,
         }
+        normalized_query = normalize_query(query)
         if kind:
-            requested = page * limit
-            result = _clean(await methods[kind](query, requested + 1))
-            normalized = items(result, kind)
+            requested = min(page * limit + 10, 100)
+            async def load():
+                return _clean(await methods[kind](normalized_query, requested))
+            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v1", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+            normalized = rank(normalized_query, items(result, kind), kind, requested)
             start = (page - 1) * limit
             page_items = normalized[start:start + limit]
             return {
@@ -90,29 +180,41 @@ class CatalogService:
                 "type": kind,
             }
 
-        preview = min(limit, 6)
-        results = await asyncio.gather(*[
-            method(query, preview) for method in methods.values()
-        ], return_exceptions=True)
+        preview = min(max(limit * 3, 12), 50)
+        async def load_all():
+            return await asyncio.gather(*[
+                method(normalized_query, preview) for method in methods.values()
+            ], return_exceptions=True)
+        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v1", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
         grouped: dict[str, list[dict[str, Any]]] = {}
-        for result_kind, result in zip(methods, results):
-            grouped[f"{result_kind}s"] = [] if isinstance(result, Exception) else items(_clean(result), result_kind)
-        priority = ("artists", "songs", "albums", "playlists")
-        top = next(
-            ({"type": key[:-1], "item": grouped[key][0]} for key in priority if grouped[key]),
-            None,
-        )
-        return {"query": query, "top_result": top, **grouped}
+        cursor = 0
+        for result_kind in methods:
+            candidates: list[dict[str, Any]] = []
+            result = results[cursor]
+            cursor += 1
+            if not isinstance(result, Exception):
+                candidates.extend(items(_clean(result), result_kind))
+            grouped[f"{result_kind}s"] = rank(normalized_query, candidates, result_kind, preview)
+        all_ranked = [(confidence(normalized_query, item, key[:-1]), key[:-1], item)
+                      for key in ("artists", "songs", "albums", "playlists") for item in grouped[key]]
+        top = None
+        if all_ranked:
+            top_confidence, top_kind, top_item = max(all_ranked, key=lambda value: value[0])
+            if top_confidence >= 0.55:
+                top = {"type": top_kind, "item": top_item, "confidence": round(top_confidence, 3)}
+        return {"query": query, "normalized_query": normalized_query, "top_result": top, **grouped}
 
     async def discover(self, limit: int) -> list[dict[str, Any]]:
         if not self.languages.languages:
             return []
         language = self.languages.languages[0]
-        trending, releases = await asyncio.gather(
-            self.catalog.get_trending(language.name, limit),
-            self.catalog.get_new_releases(language.name, limit),
-            return_exceptions=True,
-        )
+        async def load():
+            return await asyncio.gather(
+                self.catalog.get_trending(language.name, limit),
+                self.catalog.get_new_releases(language.name, limit),
+                return_exceptions=True,
+            )
+        trending, releases = await self._cached(f"music:discover:{language.id}:{limit}:v1", config.TTL_DISCOVER, load, config.STALE_CACHE_TTL)
         candidates = [
             ("trending", "songs", trending, "song"),
             ("new_releases", "albums", releases, "album"),
@@ -150,15 +252,32 @@ class CatalogService:
             return None
         return normalized_album
 
-    async def home(self, uid: str, repository: Any, recommendations: Any, limit: int) -> list[dict[str, Any]]:
+    async def home_page(
+        self,
+        uid: str,
+        repository: Any,
+        recommendations: Any,
+        limit: int,
+        offset: int = 0,
+        content_type: str = "all",
+    ) -> dict[str, Any]:
+        """Build one bounded page of the home feed.
+
+        The cursor is applied after composition so every section remains typed
+        and the client can append pages without mixing songs with entities.
+        ``request_limit`` is bounded and is never the size of the catalogue.
+        """
+        # Fetch one look-ahead item so ``has_more`` is accurate without
+        # requesting the complete catalogue.
+        request_limit = min(max(limit + offset + 1, limit), 100)
         profile, history, favorites, albums_raw, artists_raw, playlists_raw, recommended = await asyncio.gather(
             repository.get_profile(uid),
-            repository.list_history(uid, limit),
+            repository.list_history(uid, request_limit),
             repository.list_favorites(uid),
             repository.list_saved_albums(uid),
             repository.list_followed_artists(uid),
             repository.list_playlists(uid),
-            recommendations.recommendations(uid, self.catalog, limit),
+            recommendations.recommendations(uid, self.catalog, request_limit),
         )
         sections: list[dict[str, Any]] = []
 
@@ -184,4 +303,33 @@ class CatalogService:
                 add("trending", "songs", "Trending Now", items(_clean(trending), "song"))
             if not isinstance(releases, Exception):
                 add("new_releases", "albums", "New Releases", items(_clean(releases), "album"))
-        return sections
+
+        allowed = {"all": None, "song": "song", "album": "album", "artist": "artist", "playlist": "playlist"}
+        selected = allowed.get(content_type, None)
+        if selected:
+            sections = [
+                {**section, "items": [item for item in section["items"] if item.get("type") == selected]}
+                for section in sections
+            ]
+            sections = [section for section in sections if section["items"]]
+
+        # De-duplicate globally within each typed section while preserving order.
+        section_has_more = False
+        for section in sections:
+            seen: set[str] = set()
+            unique = []
+            for item in section["items"]:
+                key = f"{item.get('type')}:{item.get('id')}"
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(item)
+            section_has_more = section_has_more or len(unique) > offset + limit
+            section["items"] = unique[offset:offset + limit]
+        sections = [section for section in sections if section["items"]]
+        has_more = section_has_more
+        next_cursor = str(offset + limit) if has_more else None
+        return {"sections": sections, "next_cursor": next_cursor, "has_more": has_more, "content_type": content_type}
+
+    async def home(self, uid: str, repository: Any, recommendations: Any, limit: int) -> list[dict[str, Any]]:
+        """Compatibility wrapper for existing callers."""
+        return (await self.home_page(uid, repository, recommendations, limit))["sections"]

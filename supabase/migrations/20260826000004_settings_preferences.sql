@@ -1,0 +1,8 @@
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS streaming_quality_wifi TEXT NOT NULL DEFAULT 'high';
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS streaming_quality_mobile TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS download_quality TEXT NOT NULL DEFAULT 'high';
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS data_saver_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS autoplay_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS push_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS explicit_content_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS equalizer_preset TEXT NOT NULL DEFAULT 'Default';
