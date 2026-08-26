@@ -5,17 +5,23 @@ import re
 import uuid
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from firebase_admin import exceptions as firebase_exceptions
 
 from api.cache.redis_cache import RedisCache
+from api.catalog.routes import router as catalog_router
+from api.catalog.service import CatalogService, LanguageCatalog
 from api.core import config
 from api.db.connection import create_pool
 from api.firebase import FirebaseRuntime
 from api.gaanapy import GaanaPy
+from api.lyrics.provider import LRCLibProvider
+from api.lyrics.repository import PostgresLyricsRepository
+from api.lyrics.routes import router as lyrics_router
+from api.lyrics.service import LyricsService
 from api.personalization.repository import PostgresUserRepository
 from api.personalization.routes import router as personalization_router
 from api.personalization.routes import users_router
@@ -50,6 +56,8 @@ app = FastAPI(title="GaanaPy", version="1.0")
 app.include_router(personalization_router)
 app.include_router(users_router)
 app.include_router(pulse_router)
+app.include_router(lyrics_router)
+app.include_router(catalog_router)
 
 cors_origins = [
     o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()
@@ -122,12 +130,24 @@ app.state.user_repository = None
 app.state.personalization_service = None
 app.state.cache = None
 app.state.db_pool = None
+app.state.lyrics_service = None
+app.state.catalog_service = None
 
 
 @app.on_event("startup")
 async def startup_event():
+    language_catalog = LanguageCatalog.from_json(config.MUSIC_LANGUAGES_JSON)
     gaanapy = GaanaPy()
     app.state.gaanapy = gaanapy
+    app.state.catalog_service = CatalogService(gaanapy, language_catalog)
+
+    if config.LYRICS_PROVIDER != "lrclib":
+        raise RuntimeError(f"Unsupported LYRICS_PROVIDER: {config.LYRICS_PROVIDER}")
+    lyrics_provider = LRCLibProvider(
+        gaanapy.aiohttp,
+        user_agent=config.LYRICS_USER_AGENT,
+        timeout=config.LYRICS_TIMEOUT,
+    )
 
     cache = RedisCache(config.UPSTASH_REDIS_REST_URL, config.UPSTASH_REDIS_REST_TOKEN)
     await cache.connect()
@@ -145,6 +165,13 @@ async def startup_event():
             logger.info('"msg":"postgres connected"')
         except Exception as exc:
             logger.warning('"msg":"postgres unavailable","error":"%s"', exc)
+
+    app.state.lyrics_service = LyricsService(
+        provider=lyrics_provider,
+        repository=PostgresLyricsRepository(app.state.db_pool),
+        success_ttl=config.TTL_LYRICS,
+        not_found_ttl=config.TTL_LYRICS_NOT_FOUND,
+    )
 
 
 @app.on_event("shutdown")
@@ -453,16 +480,6 @@ async def playlists_info(
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
-
-# ---------------------------------------------------------------------------
-# Lyrics (stub — wire a licensed provider here)
-# ---------------------------------------------------------------------------
-@app.get("/lyrics/{seokey}", tags=["lyrics"], summary="Retrieve lyrics for a track.")
-async def get_lyrics(
-    seokey: str = Path(..., min_length=1, max_length=MAX_SEOKEY_LENGTH, pattern=r"^[a-z0-9\-]+$"),
-):
-    return {"available": False, "message": "Lyrics aren't available for this song."}
-
 
 # ---------------------------------------------------------------------------
 # Downloads (stub — return allowed only when source permits)

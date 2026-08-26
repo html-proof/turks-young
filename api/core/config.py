@@ -39,3 +39,7 @@ LYRICS_USER_AGENT = os.getenv(
 LYRICS_TIMEOUT = float(os.getenv("LYRICS_TIMEOUT", "10"))
 TTL_LYRICS = int(os.getenv("TTL_LYRICS", "2592000"))
 TTL_LYRICS_NOT_FOUND = int(os.getenv("TTL_LYRICS_NOT_FOUND", "21600"))
+
+# JSON array owned by the backend deployment. An empty value intentionally
+# exposes an empty catalogue instead of inventing onboarding choices.
+MUSIC_LANGUAGES_JSON = os.getenv("MUSIC_LANGUAGES_JSON", "")

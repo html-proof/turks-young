@@ -1,5 +1,6 @@
 const TTL_RULES = [
   [/^\/me(?:\/|$)/, 0],
+  [/^\/api\/(?:me|home)(?:\/|$)/, 0],
   [/^\/(health|ready)\/?$/, 0],
   [/^\/trending\b/, 600],
   [/^\/charts\b/, 600],
@@ -33,7 +34,7 @@ function corsHeaders(request, env) {
       : configured[0] || "*";
   return {
     "Access-Control-Allow-Origin": allowOrigin,
-    "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Authorization,Content-Type,X-Request-ID",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",

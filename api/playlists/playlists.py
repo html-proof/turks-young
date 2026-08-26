@@ -16,7 +16,7 @@ class Playlists:
             artwork = entry.get("atw") or entry.get("artwork") or ""
             playlists.append({
                 "seokey": seokey,
-                "title": entry.get("title") or entry.get("name") or "Playlist",
+                "title": entry.get("title") or entry.get("name") or "",
                 "language": entry.get("language") or "",
                 "images": {"urls": {
                     "large_artwork": artwork.replace("size_s", "size_l"),

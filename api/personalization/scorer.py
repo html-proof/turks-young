@@ -213,7 +213,7 @@ def preferred_languages(
         ranked = sorted(lang_scores.items(), key=lambda x: x[1], reverse=True)
         return [lang.title() for lang, _ in ranked[:max_languages]]
     profile_langs = _items(profile.get("languages"))
-    return profile_langs[:max_languages] if profile_langs else ["English"]
+    return profile_langs[:max_languages]
 
 
 # ---------------------------------------------------------------------------

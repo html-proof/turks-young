@@ -13,15 +13,21 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS user_profiles (
   uid              TEXT PRIMARY KEY REFERENCES users(uid) ON DELETE CASCADE,
   display_name     TEXT    NOT NULL DEFAULT '',
-  languages        TEXT[]  NOT NULL DEFAULT ARRAY['English'],
+  languages        TEXT[]  NOT NULL DEFAULT '{}',
+  language_ids     TEXT[]  NOT NULL DEFAULT '{}',
   favorite_genres  TEXT[]  NOT NULL DEFAULT '{}',
   favorite_artists TEXT[]  NOT NULL DEFAULT '{}',
+  favorite_artist_ids TEXT[] NOT NULL DEFAULT '{}',
   onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE user_profiles
   ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE user_profiles
+  ADD COLUMN IF NOT EXISTS language_ids TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE user_profiles
+  ADD COLUMN IF NOT EXISTS favorite_artist_ids TEXT[] NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS user_favorites (
   uid          TEXT        NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
@@ -150,3 +156,27 @@ CREATE TABLE IF NOT EXISTS player_sessions (
   device_id   TEXT,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS lyrics_cache (
+  track_id           TEXT PRIMARY KEY,
+  provider           VARCHAR(50) NOT NULL,
+  provider_lyrics_id TEXT,
+  synced_lyrics      TEXT,
+  plain_lyrics       TEXT,
+  instrumental      BOOLEAN NOT NULL DEFAULT FALSE,
+  status             VARCHAR(30) NOT NULL DEFAULT 'available'
+                     CHECK (status IN ('available', 'not_found', 'instrumental')),
+  fetched_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS recent_searches (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  uid         TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+  query       VARCHAR(200) NOT NULL,
+  result_type VARCHAR(30),
+  item        JSONB,
+  searched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_recent_searches_uid
+  ON recent_searches(uid, searched_at DESC);

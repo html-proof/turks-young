@@ -63,7 +63,8 @@ class PostgresUserRepository:
     async def get_profile(self, uid: str) -> dict[str, Any]:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT display_name, languages, favorite_genres, favorite_artists, onboarding_completed, "
+                "SELECT display_name, languages, language_ids, favorite_genres, favorite_artists, "
+                "favorite_artist_ids, onboarding_completed, "
                 "created_at, updated_at FROM user_profiles WHERE uid = $1",
                 uid,
             )
@@ -72,8 +73,10 @@ class PostgresUserRepository:
         return {
             "display_name": row["display_name"],
             "languages": list(row["languages"]),
+            "language_ids": list(row["language_ids"]),
             "favorite_genres": list(row["favorite_genres"]),
             "favorite_artists": list(row["favorite_artists"]),
+            "favorite_artist_ids": list(row["favorite_artist_ids"]),
             "onboarding_completed": row["onboarding_completed"],
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
@@ -81,7 +84,8 @@ class PostgresUserRepository:
 
     async def update_profile(self, uid: str, changes: dict[str, Any]) -> dict[str, Any]:
         allowed = {
-            "display_name", "languages", "favorite_genres", "favorite_artists",
+            "display_name", "languages", "language_ids", "favorite_genres", "favorite_artists",
+            "favorite_artist_ids",
             "onboarding_completed",
         }
         filtered = {k: v for k, v in changes.items() if k in allowed}
@@ -362,22 +366,77 @@ class PostgresUserRepository:
             result = await conn.execute("DELETE FROM users WHERE uid = $1", uid)
         return result == "DELETE 1"
 
+    # ── Recent searches ───────────────────────────────────────────────────────
+
+    async def list_recent_searches(self, uid: str, limit: int = 20) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, query, result_type, item, searched_at FROM recent_searches "
+                "WHERE uid = $1 ORDER BY searched_at DESC LIMIT $2",
+                uid, limit,
+            )
+        return [self._recent_search_record(row) for row in rows]
+
+    async def save_recent_search(self, uid: str, data: Any) -> dict[str, Any]:
+        # Keep one current entry per exact query/type for a compact cross-device list.
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM recent_searches WHERE uid = $1 AND lower(query) = lower($2) "
+                    "AND result_type IS NOT DISTINCT FROM $3",
+                    uid, data.query, data.result_type,
+                )
+                row = await conn.fetchrow(
+                    "INSERT INTO recent_searches (uid, query, result_type, item) "
+                    "VALUES ($1, $2, $3, $4::jsonb) "
+                    "RETURNING id, query, result_type, item, searched_at",
+                    uid, data.query, data.result_type,
+                    json.dumps(data.item) if data.item is not None else None,
+                )
+        return self._recent_search_record(row)
+
+    async def delete_recent_search(self, uid: str, search_id: uuid.UUID) -> bool:
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM recent_searches WHERE uid = $1 AND id = $2", uid, search_id
+            )
+        return result == "DELETE 1"
+
+    async def clear_recent_searches(self, uid: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute("DELETE FROM recent_searches WHERE uid = $1", uid)
+
+    @staticmethod
+    def _recent_search_record(row: Any) -> dict[str, Any]:
+        raw_item = row["item"]
+        item = json.loads(raw_item) if isinstance(raw_item, str) else raw_item
+        return {
+            "id": str(row["id"]),
+            "query": row["query"],
+            "result_type": row["result_type"],
+            "item": item,
+            "searched_at": row["searched_at"].isoformat(),
+        }
+
     # ── Onboarding ─────────────────────────────────────────────────────────────
 
     async def get_onboarding(self, uid: str) -> dict[str, Any]:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT languages, favorite_artists, onboarding_completed, onboarding_step "
+                "SELECT languages, language_ids, favorite_artists, favorite_artist_ids, "
+                "onboarding_completed, onboarding_step "
                 "FROM user_profiles WHERE uid = $1",
                 uid,
             )
         if row is None:
-            return {"completed": False, "step": "language", "languages": [], "favorite_artists": []}
+            return {"completed": False, "step": "language", "languages": [], "language_ids": [], "favorite_artists": [], "favorite_artist_ids": []}
         return {
             "completed": row["onboarding_completed"],
             "step": row["onboarding_step"],
             "languages": list(row["languages"]),
+            "language_ids": list(row["language_ids"]),
             "favorite_artists": list(row["favorite_artists"]),
+            "favorite_artist_ids": list(row["favorite_artist_ids"]),
         }
 
     async def update_onboarding(self, uid: str, data: OnboardingUpdate) -> dict[str, Any]:

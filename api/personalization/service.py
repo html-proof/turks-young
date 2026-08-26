@@ -68,13 +68,8 @@ class PersonalizedMusicService:
 
         # 2. Build unified preference scores.
         preferences = build_preference_scores(profile, favorites, history, signals)
-        is_cold_start = self._is_cold_start(preferences)
-        if is_cold_start:
-            logger.info("uid=%s cold-start — broadening candidate fetch", uid)
-
         seeds     = build_search_seeds(preferences, self.MAX_SEARCH_SEEDS)
         languages = preferred_languages(profile, preferences, max_languages=3)
-        top_lang  = languages[0]
 
         # 3. Build candidate fetch jobs.
         jobs: list[tuple[str, Any]] = []
@@ -95,16 +90,16 @@ class PersonalizedMusicService:
             ))
 
         # 3c. New releases in the top language.
-        if hasattr(catalog, "get_new_releases"):
+        if languages and hasattr(catalog, "get_new_releases"):
             jobs.append((
-                f"New in {top_lang}",
-                catalog.get_new_releases(top_lang, self.CANDIDATES_NEW),
+                f"New in {languages[0]}",
+                catalog.get_new_releases(languages[0], self.CANDIDATES_NEW),
             ))
 
-        # 3d. Cold-start fallback: broaden to generic "pop" / "hits" search.
-        if is_cold_start:
-            jobs.append(("Popular hits", catalog.search_songs("top hits", per_seed)))
-            jobs.append((f"Popular in {top_lang}", catalog.search_songs(top_lang, per_seed)))
+        # A true cold start returns no recommendations until backend-owned
+        # preferences or activity exist. Never seed the UI with default music.
+        if not jobs:
+            return []
 
         # 4. Fetch all candidates concurrently.
         raw_results = await asyncio.gather(

@@ -14,10 +14,10 @@ services:
         value: "*"
 
       - key: FIREBASE_PROJECT_ID
-        value: personal-songs
+        value: music-hub-d7489
 
       - key: FIREBASE_DATABASE_URL
-        value: https://personal-songs-default-rtdb.firebaseio.com
+        value: https://music-hub-d7489-default-rtdb.firebaseio.com
 
       - key: FIREBASE_APP_NAME
         value: songlist-backend
@@ -82,3 +82,8 @@ services:
 
       - key: TTL_SIMILAR
         value: "3600"
+
+      # Backend-owned onboarding catalogue. The Flutter app contains no
+      # built-in language choices and renders an empty/retry state if omitted.
+      - key: MUSIC_LANGUAGES_JSON
+        value: '[{"id":"english","name":"English","native_name":"English"},{"id":"hindi","name":"Hindi","native_name":"हिन्दी"},{"id":"tamil","name":"Tamil","native_name":"தமிழ்"},{"id":"telugu","name":"Telugu","native_name":"తెలుగు"},{"id":"bengali","name":"Bengali","native_name":"বাংলা"},{"id":"marathi","name":"Marathi","native_name":"मराठी"},{"id":"kannada","name":"Kannada","native_name":"ಕನ್ನಡ"},{"id":"malayalam","name":"Malayalam","native_name":"മലയാളം"}]'
