@@ -39,13 +39,12 @@ async def get_user_repository(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database is unavailable",
         )
-    # Never provision accounts as a side effect of a protected read/write.
-    # Account creation belongs to the authentication exchange only.
     account = await repository.get_account(user.uid)
     if account is None:
-        raise account_error("ACCOUNT_NOT_FOUND", "This account is no longer available.")
-    if account["account_status"] != "active":
-        code = "ACCOUNT_DELETED" if account["account_status"] == "deleted" else "ACCOUNT_UNAVAILABLE"
+        await repository.ensure_user(user)
+        account = await repository.get_account(user.uid)
+    if account and account.get("account_status") != "active":
+        code = "ACCOUNT_DELETED" if account.get("account_status") == "deleted" else "ACCOUNT_UNAVAILABLE"
         raise account_error(code, "This account is no longer available.")
     return repository
 

@@ -35,6 +35,9 @@ async def personalized_feed(
 ) -> dict[str, Any]:
     repo = _repo(request)
     account = await repo.get_account(user.uid)
+    if account is None:
+        await repo.ensure_user(user)
+        account = await repo.get_account(user.uid)
     if not account or account.get("account_status") != "active":
         raise HTTPException(status_code=401, detail="Account is unavailable")
     cache = getattr(request.app.state, "cache", None)
