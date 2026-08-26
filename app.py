@@ -208,7 +208,7 @@ MAX_SEOKEY_LENGTH = 200
 MAX_ARTIST_ID_LENGTH = 20
 MAX_LANGUAGE_LENGTH = 50
 
-SEO_KEY_BASE_PATTERN = r"^[a-z0-9\-]+$"
+SEO_KEY_BASE_PATTERN = r"^[a-zA-Z0-9\-_.%]+$"
 ARTIST_ID_PATTERN = r"^[0-9]+$"
 LANGUAGE_PATTERN = r"^[a-zA-Z]+(?:\s[a-zA-Z]+)*$"
 SEARCH_QUERY_PATTERN = r"^[a-zA-Z0-9\s\-'.&]+$"
@@ -223,11 +223,6 @@ def validate_seokey(
         description="The `seokey` of the resource.",
     )
 ):
-    if not re.search(r"[a-zA-Z]", seokey):
-        raise HTTPException(
-            status_code=400,
-            detail="seokey must contain at least one alphabetic character",
-        )
     return seokey
 
 
@@ -239,11 +234,31 @@ def _cache(request: Request) -> RedisCache:
     return request.app.state.cache
 
 
-async def _cached(cache: RedisCache, key: str, ttl: int, loader):
+def _is_stream_expired(data) -> bool:
+    if not isinstance(data, (list, dict)):
+        return False
+    items = data if isinstance(data, list) else [data]
+    for item in items:
+        if isinstance(item, dict):
+            url = item.get("stream_url") or ""
+            if not url and isinstance(item.get("stream_urls"), dict):
+                urls = item["stream_urls"].get("urls", {})
+                url = urls.get("very_high_quality") or urls.get("high_quality") or urls.get("medium_quality") or ""
+            if url:
+                match = re.search(r"exp=(\d+)", url)
+                if match:
+                    exp_time = int(match.group(1))
+                    if exp_time <= int(time.time()) + 60:
+                        return True
+    return False
+
+
+async def _cached(cache: RedisCache, key: str, ttl: int, loader, force_fresh: bool = False):
     """Return cached value when present, otherwise await coro, cache result, and return."""
-    hit = await cache.get(key)
-    if hit is not None:
-        return hit
+    if not force_fresh:
+        hit = await cache.get(key)
+        if hit is not None and not _is_stream_expired(hit):
+            return hit
     result = await loader()
     if not (isinstance(result, dict) and "error" in result):
         await cache.set(key, result, ttl)
@@ -297,6 +312,7 @@ async def songs_info(
     request: Request,
     seokey: Optional[str] = Query(None, min_length=1, max_length=MAX_SEOKEY_LENGTH, pattern=SEO_KEY_BASE_PATTERN),
     query: Optional[str] = Query(None, min_length=1, max_length=MAX_SEOKEY_LENGTH, pattern=SEO_KEY_BASE_PATTERN),
+    refresh: bool = Query(False),
 ):
     # Older clients used `query`; keep it as a compatible alias for the
     # provider's seokey without weakening the validation rules.
@@ -306,7 +322,7 @@ async def songs_info(
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"songs:info:{seokey}"
-    result = await _cached(cache, key, config.TTL_SONG, lambda: gaana.get_track_info([seokey]))
+    result = await _cached(cache, key, config.TTL_SONG, lambda: gaana.get_track_info([seokey]), force_fresh=refresh)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
