@@ -12,12 +12,14 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+node_modules/
 
 # Secrets — never commit these
 service_account.json
 *serviceAccount*.json
 *.pem
 *.key
+google-services.json
 
 # IDE
 .vscode/

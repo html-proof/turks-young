@@ -1,4 +1,33 @@
 class Playlists:
+    async def search_playlists(self, search_query: str, limit: int) -> list:
+        result = await self._safe_request(
+            "POST", self.api_endpoints.search_playlists_url + search_query
+        )
+        if isinstance(result, dict) and "error" in result:
+            return result
+        entries = (result.get("gr") or [{}])[0].get("gd", [])
+        playlists = []
+        for entry in entries[:limit]:
+            if not isinstance(entry, dict):
+                continue
+            seokey = entry.get("seo") or entry.get("seokey")
+            if not seokey:
+                continue
+            artwork = entry.get("atw") or entry.get("artwork") or ""
+            playlists.append({
+                "seokey": seokey,
+                "title": entry.get("title") or entry.get("name") or "Playlist",
+                "language": entry.get("language") or "",
+                "images": {"urls": {
+                    "large_artwork": artwork.replace("size_s", "size_l"),
+                    "medium_artwork": artwork.replace("size_s", "size_m"),
+                    "small_artwork": artwork,
+                }},
+            })
+        if not playlists:
+            return await self.errors.no_results()
+        return playlists
+
     async def get_playlist_info(self, playlist_id: str) -> dict:
         endpoints = self.api_endpoints
         errors = self.errors

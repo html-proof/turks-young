@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "soundwaves-cdn",
+  "main": "worker.js",
+  "compatibility_date": "2026-08-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "BACKEND_URL": "https://turks-young.onrender.com",
+    "ALLOWED_ORIGINS": "*"
+  },
+  "placement": { "mode": "smart" },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

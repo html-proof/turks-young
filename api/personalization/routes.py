@@ -1,9 +1,18 @@
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 
 from api.auth import AuthenticatedUser, get_current_user
-from api.personalization.models import ListeningEvent, ProfileUpdate, TrackSnapshot
+from api.personalization.models import (
+    AlbumSnapshot,
+    ArtistSnapshot,
+    ListeningEvent,
+    ProfileUpdate,
+    TrackSnapshot,
+    UserPlaylistCreate,
+    UserPlaylistUpdate,
+)
 from api.personalization.repository import PostgresUserRepository as FirebaseUserRepository
 from api.personalization.service import PersonalizedMusicService
 
@@ -202,3 +211,149 @@ async def get_taste(
         "top_genres":  top_n(prefs["genres"]),
         "is_cold_start": sum(sum(v.values()) for v in prefs.values()) < 10.0,
     }
+
+
+@router.get("/playlists", summary="List the user's playlists.")
+async def list_user_playlists(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> list[dict[str, Any]]:
+    return await repository.list_playlists(user.uid)
+
+
+@router.post("/playlists", status_code=status.HTTP_201_CREATED, summary="Create a playlist.")
+async def create_user_playlist(
+    playlist: UserPlaylistCreate,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    return await repository.create_playlist(user.uid, playlist)
+
+
+@router.get("/playlists/{playlist_id}", summary="Get one user playlist.")
+async def get_user_playlist(
+    playlist_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    playlist = await repository.get_playlist(user.uid, playlist_id)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return playlist
+
+
+@router.patch("/playlists/{playlist_id}", summary="Update a user playlist.")
+async def update_user_playlist(
+    playlist_id: UUID,
+    update: UserPlaylistUpdate,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    playlist = await repository.update_playlist(user.uid, playlist_id, update)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return playlist
+
+
+@router.delete("/playlists/{playlist_id}", summary="Delete a user playlist.")
+async def delete_user_playlist(
+    playlist_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, bool]:
+    if not await repository.delete_playlist(user.uid, playlist_id):
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return {"deleted": True}
+
+
+@router.post("/playlists/{playlist_id}/tracks", summary="Add a track to a playlist.")
+async def add_user_playlist_track(
+    playlist_id: UUID,
+    track: TrackSnapshot,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    playlist = await repository.add_playlist_track(user.uid, playlist_id, track)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return playlist
+
+
+@router.delete("/playlists/{playlist_id}/tracks/{seokey}", summary="Remove a playlist track.")
+async def remove_user_playlist_track(
+    playlist_id: UUID,
+    seokey: str = Path(..., min_length=1, max_length=200, pattern=r"^[a-z0-9\-]+$"),
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    playlist = await repository.remove_playlist_track(user.uid, playlist_id, seokey)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return playlist
+
+
+@router.get("/artists", summary="List followed artists.")
+async def list_followed_artists(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> list[dict[str, Any]]:
+    return await repository.list_followed_artists(user.uid)
+
+
+@router.post("/artists", status_code=status.HTTP_201_CREATED, summary="Follow an artist.")
+async def follow_artist(
+    artist: ArtistSnapshot,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    return await repository.follow_artist(user.uid, artist)
+
+
+@router.delete("/artists/{seokey}", summary="Unfollow an artist.")
+async def unfollow_artist(
+    seokey: str = Path(..., min_length=1, max_length=200, pattern=r"^[a-z0-9\-]+$"),
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, bool]:
+    if not await repository.unfollow_artist(user.uid, seokey):
+        raise HTTPException(status_code=404, detail="Followed artist not found")
+    return {"deleted": True}
+
+
+@router.get("/albums", summary="List saved albums.")
+async def list_saved_albums(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> list[dict[str, Any]]:
+    return await repository.list_saved_albums(user.uid)
+
+
+@router.post("/albums", status_code=status.HTTP_201_CREATED, summary="Save an album.")
+async def save_album(
+    album: AlbumSnapshot,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    return await repository.save_album(user.uid, album)
+
+
+@router.delete("/albums/{seokey}", summary="Remove a saved album.")
+async def remove_saved_album(
+    seokey: str = Path(..., min_length=1, max_length=200, pattern=r"^[a-z0-9\-]+$"),
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, bool]:
+    if not await repository.remove_saved_album(user.uid, seokey):
+        raise HTTPException(status_code=404, detail="Saved album not found")
+    return {"deleted": True}
+
+
+@router.delete("/account", summary="Permanently delete the authenticated account.")
+async def delete_account(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, bool]:
+    await repository.delete_account(user.uid)
+    await request.app.state.firebase.delete_user(user.uid)
+    return {"deleted": True}

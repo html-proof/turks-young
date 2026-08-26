@@ -34,6 +34,7 @@ class ProfileUpdate(BaseModel):
     languages: list[str] | None = Field(default=None, max_length=10)
     favorite_genres: list[str] | None = Field(default=None, max_length=20)
     favorite_artists: list[str] | None = Field(default=None, max_length=30)
+    onboarding_completed: bool | None = None
 
     @field_validator("languages", "favorite_genres", "favorite_artists", mode="before")
     @classmethod
@@ -66,3 +67,43 @@ class ListeningEvent(TrackSnapshot):
     played_seconds: int = Field(default=0, ge=0, le=86400)
     completed: bool = False
     source: str = Field(default="playback", min_length=1, max_length=50)
+
+
+class ArtistSnapshot(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    seokey: str = Field(min_length=1, max_length=200, pattern=SEO_KEY_PATTERN)
+    artist_id: str = Field(default="", max_length=100)
+    name: str = Field(min_length=1, max_length=300)
+    images: dict[str, Any] = Field(default_factory=dict)
+
+
+class AlbumSnapshot(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    seokey: str = Field(min_length=1, max_length=200, pattern=SEO_KEY_PATTERN)
+    album_id: str = Field(default="", max_length=100)
+    title: str = Field(min_length=1, max_length=300)
+    artists: list[str] = Field(default_factory=list, max_length=20)
+    images: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("artists", mode="before")
+    @classmethod
+    def normalize_artists(cls, value: Any) -> list[str]:
+        return _list_from_value(value)
+
+
+class UserPlaylistCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=500)
+    is_public: bool = False
+
+
+class UserPlaylistUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=500)
+    is_public: bool | None = None

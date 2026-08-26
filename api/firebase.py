@@ -65,6 +65,11 @@ class FirebaseRuntime:
             True,
         )
 
+    async def delete_user(self, uid: str) -> None:
+        if not self.app:
+            raise RuntimeError("Firebase is not configured")
+        await asyncio.to_thread(auth.delete_user, uid, app=self.app)
+
     async def close(self) -> None:
         if self.app and self._owns_app:
             await asyncio.to_thread(firebase_admin.delete_app, self.app)

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import asyncpg
 
 
@@ -9,4 +11,7 @@ async def create_pool(dsn: str) -> asyncpg.Pool:
         command_timeout=10,
         ssl="require",
     )
+    schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+    async with pool.acquire() as connection:
+        await connection.execute(schema)
     return pool
