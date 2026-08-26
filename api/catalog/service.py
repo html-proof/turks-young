@@ -181,6 +181,46 @@ class CatalogService:
                         return exact
                 except Exception as exc:
                     logger.warning("artist image search failed name=%s error=%s", name, exc)
+
+                # 3. Internet photo search via Deezer API
+                try:
+                    import urllib.parse
+                    clean_name = urllib.parse.quote(name)
+                    if hasattr(self.catalog, "aiohttp") and self.catalog.aiohttp:
+                        async with self.catalog.aiohttp.get(
+                            f"https://api.deezer.com/search/artist?q={clean_name}&limit=1",
+                            timeout=4,
+                        ) as resp:
+                            if resp.status == 200:
+                                d_data = await resp.json(content_type=None)
+                                if d_data.get("data"):
+                                    first_d = d_data["data"][0]
+                                    pic = first_d.get("picture_xl") or first_d.get("picture_big") or first_d.get("picture_medium")
+                                    if pic and "artist-default" not in pic:
+                                        return {"image_url": pic, "imageUrl": pic, "image_status": "verified"}
+                except Exception as exc:
+                    logger.warning("deezer artist photo failed name=%s error=%s", name, exc)
+
+                # 4. Internet photo search via Wikipedia API
+                try:
+                    import urllib.parse
+                    wiki_q = urllib.parse.quote(f"{name} singer musician")
+                    if hasattr(self.catalog, "aiohttp") and self.catalog.aiohttp:
+                        async with self.catalog.aiohttp.get(
+                            f"https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch={wiki_q}&gsrlimit=1&prop=pageimages&piprop=thumbnail|original&pithumbsize=500&format=json",
+                            headers={"User-Agent": "MusicHub/1.0"},
+                            timeout=4,
+                        ) as resp:
+                            if resp.status == 200:
+                                w_data = await resp.json(content_type=None)
+                                pages = w_data.get("query", {}).get("pages", {})
+                                for pid, p in pages.items():
+                                    pic = (p.get("original") or {}).get("source") or (p.get("thumbnail") or {}).get("source")
+                                    if pic:
+                                        return {"image_url": pic, "imageUrl": pic, "image_status": "verified"}
+                except Exception as exc:
+                    logger.warning("wikipedia artist photo failed name=%s error=%s", name, exc)
+
             return {}
 
         resolved = await self._cached(
