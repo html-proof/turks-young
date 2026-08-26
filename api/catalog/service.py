@@ -287,47 +287,97 @@ class CatalogService:
                 return _clean(await methods[kind](normalized_query, requested))
             # v2 invalidates older cache entries that were populated before
             # exact-match ranking and language metadata were fixed.
-            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v5", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v6", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
             normalized = rank(normalized_query, items(result, kind), kind, requested)
             # A movie search often has no movie name in the individual song
             # titles. Include the real soundtrack tracks when the query is an
             # exact/strong album match (for example, "Operation Java").
-            if kind == "song" and hasattr(self.catalog, "get_album_info"):
-                try:
-                    album_result = await self.catalog.search_albums(normalized_query, 10)
-                    matched_albums = [
-                        item for item in rank(
-                            normalized_query,
-                            items(_clean(album_result), "album"),
-                            "album",
-                            10,
-                        )
-                        if _strong_match(normalized_query, item, "album")
-                    ][:5]
-                    if matched_albums:
-                        async def soundtrack_tracks(item):
-                            details = await self.catalog.get_album_info([str(item["id"])], True)
-                            if isinstance(details, list) and details and isinstance(details[0], dict):
-                                return album(details[0]).get("songs") or []
-                            return []
-
-                        expanded = await asyncio.gather(
-                            *(soundtrack_tracks(item) for item in matched_albums),
-                            return_exceptions=True,
-                        )
-                        soundtrack_songs = [
-                            track for tracks in expanded
-                            if isinstance(tracks, list) for track in tracks
-                        ]
-                        if soundtrack_songs:
-                            normalized = rank(
+            if kind == "song":
+                extra_candidates: list[dict[str, Any]] = []
+                if hasattr(self.catalog, "get_album_info"):
+                    try:
+                        album_result = await self.catalog.search_albums(normalized_query, 10)
+                        matched_albums = [
+                            item for item in rank(
                                 normalized_query,
-                                items(_clean(result), "song") + soundtrack_songs,
-                                "song",
-                                requested,
+                                items(_clean(album_result), "album"),
+                                "album",
+                                10,
                             )
-                except Exception as exc:
-                    logger.warning("typed soundtrack search failed query=%r error=%s", query, exc)
+                            if _strong_match(normalized_query, item, "album")
+                        ][:5]
+                        if matched_albums:
+                            async def soundtrack_tracks(item):
+                                try:
+                                    details = await self.catalog.get_album_info([str(item["id"])], True)
+                                    if isinstance(details, list) and details and isinstance(details[0], dict):
+                                        return album(details[0]).get("songs") or []
+                                    return []
+                                except Exception as exc:
+                                    logger.warning("typed soundtrack search failed query=%r error=%s", query, exc)
+                                    return []
+
+                            expanded = await asyncio.gather(*(soundtrack_tracks(item) for item in matched_albums))
+                            for tracks in expanded:
+                                if isinstance(tracks, list):
+                                    extra_candidates.extend(tracks)
+                    except Exception as exc:
+                        logger.warning("typed soundtrack search failed query=%r error=%s", query, exc)
+
+                # Artist top-hits deep scan
+                if hasattr(self.catalog, "get_top_tracks"):
+                    try:
+                        artist_result = await self.catalog.search_artists(normalized_query, 5)
+                        matched_artists = [
+                            item for item in rank(
+                                normalized_query,
+                                items(_clean(artist_result), "artist"),
+                                "artist",
+                                5,
+                            )
+                            if _strong_match(normalized_query, item, "artist")
+                        ][:3]
+                        if matched_artists:
+                            async def artist_tracks(item):
+                                try:
+                                    res = await self.catalog.get_top_tracks(str(item["id"]), limit=15)
+                                    if isinstance(res, dict) and "tracks" in res:
+                                        return items(res["tracks"], "song")
+                                    elif isinstance(res, list):
+                                        return items(res, "song")
+                                    return []
+                                except Exception:
+                                    return []
+
+                            expanded_artists = await asyncio.gather(*(artist_tracks(item) for item in matched_artists))
+                            for tracks in expanded_artists:
+                                if isinstance(tracks, list):
+                                    extra_candidates.extend(tracks)
+                    except Exception:
+                        pass
+
+                # Multi-keyword deep scan for combined queries like "believer imagine dragons"
+                query_words = [w for w in normalized_query.split() if len(w) > 2]
+                if len(query_words) > 1 and len(normalized) < 4:
+                    try:
+                        async def sub_search(w):
+                            try:
+                                return items(_clean(await self.catalog.search_songs(w, 10)), "song")
+                            except Exception:
+                                return []
+                        sub_res = await asyncio.gather(*(sub_search(w) for w in query_words))
+                        for sub_list in sub_res:
+                            extra_candidates.extend(sub_list)
+                    except Exception:
+                        pass
+
+                if extra_candidates:
+                    normalized = rank(
+                        normalized_query,
+                        items(_clean(result), "song") + extra_candidates,
+                        "song",
+                        requested,
+                    )
             if kind == "artist":
                 normalized = await self._hydrate_artist_images(normalized)
             logger.info(
@@ -351,7 +401,7 @@ class CatalogService:
             ], return_exceptions=True)
         # Keep the version in the key so old broad/fuzzy result sets cannot
         # hide a valid soundtrack such as Sarkar (Tamil).
-        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v5", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v6", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
         grouped: dict[str, list[dict[str, Any]]] = {}
         cursor = 0
         for result_kind in methods:
@@ -370,9 +420,7 @@ class CatalogService:
                 len(grouped[f"{result_kind}s"]),
             )
 
-        # A movie-name search must also find songs whose titles do not repeat
-        # the movie name. For example, searching "sarkar" should expose the
-        # Tamil soundtrack tracks through the matching album's real tracklist.
+        # Deep scan 1: Movie-name / soundtrack expansion
         matched_albums = [
             item for item in grouped.get("albums", [])
             if _strong_match(normalized_query, item, "album")
@@ -385,6 +433,7 @@ class CatalogService:
             reverse=True,
         )
         matched_albums = matched_albums[:5]
+        extra_songs: list[dict[str, Any]] = []
         if matched_albums and hasattr(self.catalog, "get_album_info"):
             async def soundtrack_tracks(item):
                 try:
@@ -399,14 +448,52 @@ class CatalogService:
                 return []
 
             expanded = await asyncio.gather(*(soundtrack_tracks(item) for item in matched_albums))
-            soundtrack_songs = [track for tracks in expanded for track in tracks]
-            if soundtrack_songs:
-                grouped["songs"] = rank(
-                    normalized_query,
-                    grouped.get("songs", []) + soundtrack_songs,
-                    "song",
-                    preview,
-                )
+            for tracks in expanded:
+                if isinstance(tracks, list):
+                    extra_songs.extend(tracks)
+
+        # Deep scan 2: Artist top-tracks expansion when searching artist names
+        matched_artists = [
+            item for item in grouped.get("artists", [])
+            if _strong_match(normalized_query, item, "artist")
+        ][:3]
+        if matched_artists and hasattr(self.catalog, "get_top_tracks"):
+            async def artist_top_tracks(item):
+                try:
+                    res = await self.catalog.get_top_tracks(str(item["id"]), limit=15)
+                    if isinstance(res, dict) and "tracks" in res:
+                        return items(res["tracks"], "song")
+                    elif isinstance(res, list):
+                        return items(res, "song")
+                except Exception as exc:
+                    logger.warning("search artist top tracks expansion failed artist_id=%s error=%s", item.get("id"), exc)
+                return []
+
+            expanded_artist_tracks = await asyncio.gather(*(artist_top_tracks(item) for item in matched_artists))
+            for tracks in expanded_artist_tracks:
+                if isinstance(tracks, list):
+                    extra_songs.extend(tracks)
+
+        # Deep scan 3: Multi-word query fallback when direct song search is sparse
+        query_words = [w for w in normalized_query.split() if len(w) > 2]
+        if len(query_words) > 1 and len(grouped.get("songs", [])) < 4:
+            async def sub_search(w):
+                try:
+                    return items(_clean(await self.catalog.search_songs(w, 10)), "song")
+                except Exception:
+                    return []
+            sub_res = await asyncio.gather(*(sub_search(w) for w in query_words))
+            for sub_list in sub_res:
+                extra_songs.extend(sub_list)
+
+        if extra_songs:
+            grouped["songs"] = rank(
+                normalized_query,
+                grouped.get("songs", []) + extra_songs,
+                "song",
+                preview,
+            )
+
         grouped["songs"] = _apply_album_artwork(
             grouped.get("songs", []),
             grouped.get("albums", []),

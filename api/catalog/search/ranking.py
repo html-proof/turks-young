@@ -23,14 +23,24 @@ def _tokens(value: str) -> list[str]:
 
 def _text(item: dict[str, Any], kind: str) -> tuple[str, str, str]:
     if kind == "artist":
-        return str(item.get("name") or ""), "", ""
+        return str(item.get("name") or item.get("title") or ""), "", ""
     title = str(item.get("title") or item.get("name") or "")
     artists = item.get("artists") or []
-    artist_text = ", ".join(str(a.get("name") or "") for a in artists if isinstance(a, dict))
-    if not artist_text and isinstance(item.get("artist"), dict):
-        artist_text = str(item["artist"].get("name") or "")
-    album = item.get("album") if isinstance(item.get("album"), dict) else {}
-    return title, artist_text, str(album.get("name") or "")
+    artist_text = ", ".join(str(a.get("name") or a.get("title") or "") for a in artists if isinstance(a, dict))
+    if not artist_text:
+        if isinstance(item.get("artist"), dict):
+            artist_text = str(item["artist"].get("name") or item["artist"].get("title") or "")
+        elif isinstance(item.get("artist"), str):
+            artist_text = item["artist"]
+        elif isinstance(item.get("artists"), str):
+            artist_text = item["artists"]
+    album = item.get("album")
+    album_text = ""
+    if isinstance(album, dict):
+        album_text = str(album.get("title") or album.get("name") or "")
+    elif isinstance(album, str):
+        album_text = album
+    return title, artist_text, album_text
 
 
 def _similarity(query: str, value: str) -> float:
@@ -56,17 +66,24 @@ def score(query: str, item: dict[str, Any], kind: str) -> float:
         if normalized == q:
             best = max(best, weight)
         elif normalized.startswith(q):
-            best = max(best, weight * 0.80)
+            best = max(best, weight * 0.85)
         elif all(token in _tokens(normalized) for token in _tokens(q)):
-            best = max(best, weight * 0.65)
+            best = max(best, weight * 0.70)
         else:
             # Fuzzy matching is intentionally gated by the endpoint's candidate
             # retrieval; once a provider returns a near match, retain enough
             # signal for common misspellings such as "arjit sing".
             best = max(best, weight * 0.75 * _similarity(q, normalized))
     query_tokens = set(_tokens(q))
-    if len(query_tokens) > 1 and query_tokens & set(_tokens(title)) and query_tokens & set(_tokens(artists)):
-        best += 25.0
+    combined_tokens = set(_tokens(f"{title} {artists} {album}"))
+    if len(query_tokens) > 1:
+        matched_tokens = query_tokens & combined_tokens
+        if len(matched_tokens) == len(query_tokens):
+            best = max(best, 95.0)
+        elif len(matched_tokens) > 1:
+            best += (len(matched_tokens) / len(query_tokens)) * 30.0
+        if query_tokens & set(_tokens(title)) and query_tokens & set(_tokens(artists)):
+            best += 25.0
     popularity = item.get("popularity_score") or item.get("popularity") or 0
     try:
         best += min(float(popularity), 1.0) * 12.0
@@ -92,6 +109,14 @@ def _strong_match(query: str, item: dict[str, Any], kind: str) -> bool:
         # but every query word must still be present as a complete/prefix word.
         if len(query_tokens) > 1 and all(
             any(token == wanted or token.startswith(wanted) for token in tokens)
+            for wanted in query_tokens
+        ):
+            return True
+    # Cross-field token matching (e.g. searching "Believer Imagine Dragons" or "Tum Hi Ho Arijit")
+    if len(query_tokens) > 1:
+        combined_tokens = _tokens(f"{title} {artists} {album}")
+        if all(
+            any(token == wanted or token.startswith(wanted) for token in combined_tokens)
             for wanted in query_tokens
         ):
             return True
