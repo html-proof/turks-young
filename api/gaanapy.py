@@ -22,7 +22,13 @@ logger = logging.getLogger(__name__)
 class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, Discovery):
     def __init__(self):
         self.aiohttp = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=config.UPSTREAM_TIMEOUT)
+            timeout=aiohttp.ClientTimeout(total=config.UPSTREAM_TIMEOUT),
+            headers={
+                "User-Agent": "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+                "Accept": "application/json",
+                "X-Forwarded-For": "49.37.0.1",
+                "CF-IPCountry": "IN",
+            },
         )
         self.api_endpoints = endpoints
         self.functions = Functions()
