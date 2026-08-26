@@ -1,15 +1,19 @@
 FROM python:alpine
 
+RUN addgroup -S app && adduser -S app -G app
+
 WORKDIR /turks-young
 
 COPY api api/
 COPY app.py app.py
 COPY requirements.txt requirements.txt
 
+RUN apk add g++ make libffi-dev openssl-dev --no-cache \
+ && pip3 install --no-cache-dir -r requirements.txt \
+ && chown -R app:app /turks-young
+
 EXPOSE 8000
 
-RUN apk add g++ make libffi-dev openssl-dev --no-cache
+USER app
 
-RUN pip3 install -r requirements.txt
-
-CMD ["python", "-m", "uvicorn", "app:app" , "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
