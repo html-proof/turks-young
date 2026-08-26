@@ -287,7 +287,7 @@ class CatalogService:
                 return _clean(await methods[kind](normalized_query, requested))
             # v2 invalidates older cache entries that were populated before
             # exact-match ranking and language metadata were fixed.
-            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v6", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v8", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
             normalized = rank(normalized_query, items(result, kind), kind, requested)
             # A movie search often has no movie name in the individual song
             # titles. Include the real soundtrack tracks when the query is an
@@ -401,7 +401,7 @@ class CatalogService:
             ], return_exceptions=True)
         # Keep the version in the key so old broad/fuzzy result sets cannot
         # hide a valid soundtrack such as Sarkar (Tamil).
-        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v7", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v8", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
         grouped: dict[str, list[dict[str, Any]]] = {}
         cursor = 0
         for result_kind in methods:
