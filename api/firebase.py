@@ -77,7 +77,6 @@ class FirebaseRuntime:
             auth.verify_id_token,
             token,
             self.app,
-            True,
         )
 
     async def delete_user(self, uid: str) -> None:

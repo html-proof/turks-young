@@ -259,7 +259,7 @@ async def ready(request: Request):
     return {"status": "ready"}
 
 
-@app.get("/", tags=["ops"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["ops"])
 async def home():
     return {"docs": "/docs", "github": "https://github.com/html-proof/turks-young"}
 
