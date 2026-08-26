@@ -2,6 +2,7 @@ services:
   - type: web
     name: soundwaves-api
     runtime: python
+    rootDir: Songlist
     buildCommand: pip install --root-user-action=ignore -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     plan: free
