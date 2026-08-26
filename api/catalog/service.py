@@ -401,7 +401,7 @@ class CatalogService:
             ], return_exceptions=True)
         # Keep the version in the key so old broad/fuzzy result sets cannot
         # hide a valid soundtrack such as Sarkar (Tamil).
-        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v6", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v7", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
         grouped: dict[str, list[dict[str, Any]]] = {}
         cursor = 0
         for result_kind in methods:
@@ -420,19 +420,20 @@ class CatalogService:
                 len(grouped[f"{result_kind}s"]),
             )
 
-        # Deep scan 1: Movie-name / soundtrack expansion
+        # Deep scan 1: Movie-name / soundtrack expansion across all languages
         matched_albums = [
             item for item in grouped.get("albums", [])
             if _strong_match(normalized_query, item, "album")
         ]
         matched_albums.sort(
             key=lambda item: (
-                "soundtrack" in normalize_query(str(item.get("title") or item.get("name") or "")),
                 normalize_query(str(item.get("title") or item.get("name") or "")) == normalized_query,
+                "soundtrack" in normalize_query(str(item.get("title") or item.get("name") or "")),
+                normalize_query(str(item.get("title") or item.get("name") or "")).startswith(normalized_query),
             ),
             reverse=True,
         )
-        matched_albums = matched_albums[:5]
+        matched_albums = matched_albums[:10]
         extra_songs: list[dict[str, Any]] = []
         if matched_albums and hasattr(self.catalog, "get_album_info"):
             async def soundtrack_tracks(item):

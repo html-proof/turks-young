@@ -103,11 +103,11 @@ def score(query: str, item: dict[str, Any], kind: str) -> float:
         if query_tokens & set(_tokens(title)) and query_tokens & set(_tokens(artists)):
             best += 25.0
 
-    # 1. Soundtrack / Album match boost (e.g. searching "pattalam", "operation java", "jilla")
+    # 1. Soundtrack / Album match boost (e.g. searching "classmates", "pattalam", "operation java", "jilla")
     norm_album = normalize_query(album)
     clean_album = _OST_KEYWORDS.sub("", norm_album).strip()
     if clean_album and (clean_album == q or clean_album.startswith(q)):
-        best = max(best, 85.0)
+        best = max(best, 95.0)
         if _OST_KEYWORDS.search(norm_album) or _OST_KEYWORDS.search(title):
             best += 10.0
 
