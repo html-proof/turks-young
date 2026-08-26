@@ -133,18 +133,23 @@ async def save_artists(
 ):
     if selection.artist_ids is None:
         raise HTTPException(status_code=422, detail="artist_ids is required")
-    result = await request.app.state.gaanapy.get_artist_info(selection.artist_ids, False)
-    valid_items = {
-        item.get("seokey"): item for item in result
-        if isinstance(item, dict) and item.get("seokey")
-    } if isinstance(result, list) else {}
-    valid_ids = set(valid_items)
-    unknown = [item for item in selection.artist_ids if item not in valid_ids]
-    if unknown:
-        raise HTTPException(status_code=422, detail={"unknown_artist_ids": unknown})
-    names = [valid_items[item].get("name", "") for item in selection.artist_ids]
+    # Best-effort name resolution — these IDs already came from our own catalog
+    # API so we trust them. Don't block or 422 if Gaana is slow/unavailable.
+    names: dict[str, str] = {}
+    try:
+        result = await request.app.state.gaanapy.get_artist_info(selection.artist_ids, False)
+        if isinstance(result, list):
+            for item in result:
+                if isinstance(item, dict) and item.get("seokey") and item.get("name"):
+                    names[item["seokey"]] = item["name"]
+    except Exception:
+        pass
     await repository.update_profile(
-        user.uid, {"favorite_artists": names, "favorite_artist_ids": selection.artist_ids}
+        user.uid,
+        {
+            "favorite_artist_ids": selection.artist_ids,
+            "favorite_artists": [names.get(sid, "") for sid in selection.artist_ids],
+        },
     )
     state = await repository.update_onboarding(
         user.uid,
