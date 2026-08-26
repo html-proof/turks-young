@@ -1,6 +1,6 @@
 FROM python:alpine
 
-WORKDIR /GaanaPy
+WORKDIR /turks-young
 
 COPY api api/
 COPY app.py app.py
