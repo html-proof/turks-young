@@ -441,21 +441,6 @@ async def playlists_search(
     return result
 
 
-@app.get("/playlists/search/", summary="Search for catalog playlists.")
-async def playlists_search(
-    request: Request,
-    query: str = Query(..., min_length=1, max_length=MAX_QUERY_LENGTH, pattern=SEARCH_QUERY_PATTERN),
-    limit: Optional[int] = Query(DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT),
-):
-    gaana = _gaana(request)
-    cache = _cache(request)
-    key = f"playlists:search:{query}:{limit}"
-    result = await _cached(cache, key, config.TTL_SEARCH, gaana.search_playlists(query, limit))
-    if isinstance(result, dict) and "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
-    return result
-
-
 @app.get("/playlists/info/", summary="Retrieve detailed information on a playlist.")
 async def playlists_info(
     request: Request,
