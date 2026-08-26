@@ -107,3 +107,52 @@ class UserPlaylistUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=500)
     is_public: bool | None = None
+
+
+class TrackOrderUpdate(BaseModel):
+    seokeys: list[str] = Field(min_length=1, max_length=500)
+
+
+class OnboardingUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    languages: list[str] | None = Field(default=None, max_length=10)
+    favorite_artists: list[str] | None = Field(default=None, max_length=30)
+    completed: bool | None = None
+    step: str | None = Field(default=None, max_length=50)
+
+    @field_validator("languages", "favorite_artists", mode="before")
+    @classmethod
+    def normalize_lists(cls, value: Any) -> list[str] | None:
+        return None if value is None else _list_from_value(value)
+
+
+class PulsePostCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    body: str = Field(default="", max_length=1000)
+    track: dict[str, Any] | None = None
+    album: dict[str, Any] | None = None
+    playlist_id: str | None = Field(default=None, max_length=36)
+
+
+class PulseCommentCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    body: str = Field(min_length=1, max_length=1000)
+
+
+class DeviceRegister(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    token: str = Field(min_length=1, max_length=500)
+    platform: str = Field(min_length=1, max_length=20)
+    device_name: str | None = Field(default=None, max_length=150)
+
+
+class PlayerSessionUpdate(BaseModel):
+    track: dict[str, Any] | None = None
+    queue: list[Any] = Field(default_factory=list)
+    position_ms: int = Field(default=0, ge=0)
+    playing: bool = False
+    device_id: str | None = Field(default=None, max_length=200)

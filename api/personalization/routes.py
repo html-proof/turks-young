@@ -7,8 +7,14 @@ from api.auth import AuthenticatedUser, get_current_user
 from api.personalization.models import (
     AlbumSnapshot,
     ArtistSnapshot,
+    DeviceRegister,
     ListeningEvent,
+    OnboardingUpdate,
+    PlayerSessionUpdate,
     ProfileUpdate,
+    PulseCommentCreate,
+    PulsePostCreate,
+    TrackOrderUpdate,
     TrackSnapshot,
     UserPlaylistCreate,
     UserPlaylistUpdate,
@@ -18,6 +24,7 @@ from api.personalization.service import PersonalizedMusicService
 
 
 router = APIRouter(prefix="/me", tags=["Personalization"])
+users_router = APIRouter(prefix="/users", tags=["Users"])
 
 
 async def get_user_repository(
@@ -356,4 +363,171 @@ async def delete_account(
 ) -> dict[str, bool]:
     await repository.delete_account(user.uid)
     await request.app.state.firebase.delete_user(user.uid)
+    return {"deleted": True}
+
+
+# ── Onboarding ──────────────────────────────────────────────────────────────
+
+@router.get("/onboarding", summary="Get onboarding state.")
+async def get_onboarding(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    return await repository.get_onboarding(user.uid)
+
+
+@router.patch("/onboarding", summary="Update onboarding state.")
+async def update_onboarding(
+    data: OnboardingUpdate,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    return await repository.update_onboarding(user.uid, data)
+
+
+# ── Track reorder ────────────────────────────────────────────────────────────
+
+@router.patch("/playlists/{playlist_id}/tracks/order", summary="Reorder playlist tracks.")
+async def reorder_playlist_tracks(
+    playlist_id: UUID,
+    data: TrackOrderUpdate,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    playlist = await repository.reorder_playlist_tracks(user.uid, playlist_id, data)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return playlist
+
+
+# ── User follows ─────────────────────────────────────────────────────────────
+
+@router.get("/following", summary="List users you follow.")
+async def list_following(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> list[dict[str, Any]]:
+    return await repository.list_following(user.uid)
+
+
+@router.get("/followers", summary="List your followers.")
+async def list_followers(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> list[dict[str, Any]]:
+    return await repository.list_followers(user.uid)
+
+
+@users_router.post("/{uid}/follow", status_code=status.HTTP_204_NO_CONTENT, summary="Follow a user.")
+async def follow_user(
+    uid: str = Path(..., min_length=1, max_length=128),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> None:
+    if uid == current_user.uid:
+        raise HTTPException(status_code=400, detail="Cannot follow yourself")
+    await repository.follow_user(current_user.uid, uid)
+
+
+@users_router.delete("/{uid}/follow", status_code=status.HTTP_204_NO_CONTENT, summary="Unfollow a user.")
+async def unfollow_user(
+    uid: str = Path(..., min_length=1, max_length=128),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> None:
+    await repository.unfollow_user(current_user.uid, uid)
+
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+@router.get("/notifications", summary="List notifications.")
+async def list_notifications(
+    limit: int = Query(50, ge=1, le=100),
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> list[dict[str, Any]]:
+    return await repository.list_notifications(user.uid, limit)
+
+
+@router.patch("/notifications/{notification_id}/read", summary="Mark a notification read.")
+async def mark_notification_read(
+    notification_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, bool]:
+    if not await repository.mark_notification_read(user.uid, notification_id):
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"updated": True}
+
+
+@router.post("/notifications/read-all", summary="Mark all notifications read.")
+async def mark_all_notifications_read(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, int]:
+    count = await repository.mark_all_notifications_read(user.uid)
+    return {"updated": count}
+
+
+@router.delete("/notifications/{notification_id}", summary="Delete a notification.")
+async def delete_notification(
+    notification_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, bool]:
+    if not await repository.delete_notification(user.uid, notification_id):
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"deleted": True}
+
+
+# ── FCM Devices ───────────────────────────────────────────────────────────────
+
+@router.post("/devices", status_code=status.HTTP_201_CREATED, summary="Register FCM device token.")
+async def register_device(
+    data: DeviceRegister,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    return await repository.register_device(user.uid, data)
+
+
+@router.delete("/devices/{device_id}", summary="Unregister FCM device token.")
+async def unregister_device(
+    device_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, bool]:
+    if not await repository.unregister_device(user.uid, device_id):
+        raise HTTPException(status_code=404, detail="Device not found")
+    return {"deleted": True}
+
+
+# ── Player session ────────────────────────────────────────────────────────────
+
+@router.get("/player-session", summary="Get current player session.")
+async def get_player_session(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    session = await repository.get_player_session(user.uid)
+    if session is None:
+        return {"track": None, "queue": [], "position_ms": 0, "playing": False, "device_id": None}
+    return session
+
+
+@router.put("/player-session", summary="Save player session.")
+async def put_player_session(
+    data: PlayerSessionUpdate,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    return await repository.put_player_session(user.uid, data)
+
+
+@router.delete("/player-session", summary="Clear player session.")
+async def delete_player_session(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, bool]:
+    await repository.delete_player_session(user.uid)
     return {"deleted": True}

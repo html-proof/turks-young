@@ -18,6 +18,8 @@ from api.firebase import FirebaseRuntime
 from api.gaanapy import GaanaPy
 from api.personalization.repository import PostgresUserRepository
 from api.personalization.routes import router as personalization_router
+from api.personalization.routes import users_router
+from api.pulse.routes import router as pulse_router
 from api.personalization.service import PersonalizedMusicService
 
 # ---------------------------------------------------------------------------
@@ -46,6 +48,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 app = FastAPI(title="GaanaPy", version="1.0")
 app.include_router(personalization_router)
+app.include_router(users_router)
+app.include_router(pulse_router)
 
 cors_origins = [
     o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()
@@ -437,6 +441,21 @@ async def playlists_search(
     return result
 
 
+@app.get("/playlists/search/", summary="Search for catalog playlists.")
+async def playlists_search(
+    request: Request,
+    query: str = Query(..., min_length=1, max_length=MAX_QUERY_LENGTH, pattern=SEARCH_QUERY_PATTERN),
+    limit: Optional[int] = Query(DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT),
+):
+    gaana = _gaana(request)
+    cache = _cache(request)
+    key = f"playlists:search:{query}:{limit}"
+    result = await _cached(cache, key, config.TTL_SEARCH, gaana.search_playlists(query, limit))
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
 @app.get("/playlists/info/", summary="Retrieve detailed information on a playlist.")
 async def playlists_info(
     request: Request,
@@ -449,6 +468,27 @@ async def playlists_info(
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
+
+# ---------------------------------------------------------------------------
+# Lyrics (stub — wire a licensed provider here)
+# ---------------------------------------------------------------------------
+@app.get("/lyrics/{seokey}", tags=["lyrics"], summary="Retrieve lyrics for a track.")
+async def get_lyrics(
+    seokey: str = Path(..., min_length=1, max_length=MAX_SEOKEY_LENGTH, pattern=r"^[a-z0-9\-]+$"),
+):
+    return {"available": False, "message": "Lyrics aren't available for this song."}
+
+
+# ---------------------------------------------------------------------------
+# Downloads (stub — return allowed only when source permits)
+# ---------------------------------------------------------------------------
+@app.get("/tracks/{seokey}/download-authorization", tags=["downloads"],
+         summary="Check download entitlement for a track.")
+async def download_authorization(
+    seokey: str = Path(..., min_length=1, max_length=MAX_SEOKEY_LENGTH, pattern=r"^[a-z0-9\-]+$"),
+):
+    return {"download_allowed": False}
+
 
 # ---------------------------------------------------------------------------
 # OpenAPI schema
