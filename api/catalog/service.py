@@ -248,8 +248,47 @@ class CatalogService:
                 return _clean(await methods[kind](normalized_query, requested))
             # v2 invalidates older cache entries that were populated before
             # exact-match ranking and language metadata were fixed.
-            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v2", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v3", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
             normalized = rank(normalized_query, items(result, kind), kind, requested)
+            # A movie search often has no movie name in the individual song
+            # titles. Include the real soundtrack tracks when the query is an
+            # exact/strong album match (for example, "Operation Java").
+            if kind == "song" and hasattr(self.catalog, "get_album_info"):
+                try:
+                    album_result = await self.catalog.search_albums(normalized_query, 10)
+                    matched_albums = [
+                        item for item in rank(
+                            normalized_query,
+                            items(_clean(album_result), "album"),
+                            "album",
+                            10,
+                        )
+                        if _strong_match(normalized_query, item, "album")
+                    ][:5]
+                    if matched_albums:
+                        async def soundtrack_tracks(item):
+                            details = await self.catalog.get_album_info([str(item["id"])], True)
+                            if isinstance(details, list) and details and isinstance(details[0], dict):
+                                return album(details[0]).get("songs") or []
+                            return []
+
+                        expanded = await asyncio.gather(
+                            *(soundtrack_tracks(item) for item in matched_albums),
+                            return_exceptions=True,
+                        )
+                        soundtrack_songs = [
+                            track for tracks in expanded
+                            if isinstance(tracks, list) for track in tracks
+                        ]
+                        if soundtrack_songs:
+                            normalized = rank(
+                                normalized_query,
+                                items(_clean(result), "song") + soundtrack_songs,
+                                "song",
+                                requested,
+                            )
+                except Exception as exc:
+                    logger.warning("typed soundtrack search failed query=%r error=%s", query, exc)
             if kind == "artist":
                 normalized = await self._hydrate_artist_images(normalized)
             logger.info(
@@ -273,7 +312,7 @@ class CatalogService:
             ], return_exceptions=True)
         # Keep the version in the key so old broad/fuzzy result sets cannot
         # hide a valid soundtrack such as Sarkar (Tamil).
-        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v2", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v3", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
         grouped: dict[str, list[dict[str, Any]]] = {}
         cursor = 0
         for result_kind in methods:

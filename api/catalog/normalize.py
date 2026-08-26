@@ -10,7 +10,11 @@ def _csv(value: Any) -> list[str]:
 
 
 def _image(item: dict[str, Any]) -> str | None:
-    for key in ("imageUrl", "image_url", "thumbnail", "photo", "artist_image", "artworkUrl", "artwork"):
+    for key in (
+        "imageUrl", "image_url", "thumbnail", "photo", "artist_image",
+        "artworkUrl", "artwork", "artwork_large", "artwork_web",
+        "artwork_medium", "album_artwork", "atw",
+    ):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -23,15 +27,20 @@ def _image(item: dict[str, Any]) -> str | None:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     urls = (item.get("images") or {}).get("urls") or {}
-    return urls.get("large_artwork") or urls.get("medium_artwork") or urls.get("small_artwork") or None
+    return (
+        urls.get("large_artwork") or urls.get("medium_artwork")
+        or urls.get("small_artwork") or urls.get("large")
+        or urls.get("medium") or urls.get("small") or None
+    )
 
 
 def _images(item: dict[str, Any]) -> dict[str, str]:
     urls = (item.get("images") or {}).get("urls") or {}
+    fallback = _image(item) or ""
     return {
-        "small": urls.get("small_artwork") or "",
-        "medium": urls.get("medium_artwork") or "",
-        "large": urls.get("large_artwork") or "",
+        "small": urls.get("small_artwork") or urls.get("small") or fallback,
+        "medium": urls.get("medium_artwork") or urls.get("medium") or fallback,
+        "large": urls.get("large_artwork") or urls.get("large") or fallback,
     }
 
 
@@ -72,7 +81,12 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
     # album tracklists do not become metadata-only tracks.
     direct_stream = item.get("stream_url") or item.get("streamUrl") or ""
     seconds = duration_seconds(item.get("duration"))
-    artwork_url = _image(item)
+    # Provider song records expose artist_image alongside the actual album
+    # artwork. Prefer the track/album artwork fields so every song keeps its
+    # own cover instead of inheriting an artist portrait.
+    artwork_url = next((str(item.get(key)).strip() for key in (
+        "artwork_large", "artwork_web", "artwork", "album_artwork",
+    ) if item.get(key)), None) or _image(item)
     album_id = str(item.get("album_seokey") or item.get("album_id") or "")
     album_title = str(item.get("album") or "")
     return {

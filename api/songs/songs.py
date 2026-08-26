@@ -1,16 +1,17 @@
 import asyncio
+from api.provider_search import encoded_query, search_entries
 
 class Songs:
     async def search_songs(self, search_query: str, limit: int) -> list:
         endpoints = self.api_endpoints
         errors = self.errors
-        result = await self._safe_request("POST", endpoints.search_songs_url + search_query)
+        result = await self._safe_request("POST", endpoints.search_songs_url + encoded_query(search_query))
         if isinstance(result, dict) and "error" in result:
             return result
         track_ids = []
-        gd = (result.get('gr') or [{}])[0].get('gd', [])
-        for i in range(min(limit, len(gd))):
-            seo = gd[i].get('seo') if isinstance(gd[i], dict) else None
+        entries = search_entries(result)
+        for i in range(min(limit, len(entries))):
+            seo = entries[i].get('seo') or entries[i].get('seokey')
             if seo:
                 track_ids.append(seo)
         if len(track_ids) == 0:

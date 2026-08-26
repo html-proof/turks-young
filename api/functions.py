@@ -8,41 +8,37 @@ class Functions:
         self.BLOCK_SIZE = 16
     
     async def decryptLink(self, encrypted_data: str) -> str:
+        encrypted_data = (encrypted_data or "").strip()
+        if not encrypted_data:
+            return ""
+
+        # Gaana has used two encodings. Try the current offset-prefixed
+        # payload first, then retain compatibility with older detail records.
         try:
-            encrypted_data = encrypted_data.strip()
-            ## This master key can possibly keep changing.
-            KEY = b'gy1t#b@jl(b$wtme'
-            offset = int(encrypted_data[0]) ## Calculate offset from the first character.
-
-            ## Extract the raw IV using the offset.
-            ivRaw = encrypted_data[offset:offset + self.BLOCK_SIZE]
-            iv = ivRaw.encode("utf-8")
-
-            ## Calculate ciphertext.
-            cipher_text_b64 = encrypted_data[offset + self.BLOCK_SIZE:]
-            cipher_bytes = base64.b64decode(cipher_text_b64)
-
-            ## Decrypt ciphertext to get final URL.
-            cipher = AES.new(KEY, AES.MODE_CBC, iv)
-            decrypted = cipher.decrypt(cipher_bytes)
-
-            ## Older responses use PKCS#7 padding; current responses may not.
+            offset = int(encrypted_data[0])
+            iv = encrypted_data[offset:offset + self.BLOCK_SIZE].encode("utf-8")
+            cipher_text = encrypted_data[offset + self.BLOCK_SIZE:]
+            cipher_bytes = base64.b64decode(cipher_text + ("=" * (-len(cipher_text) % 4)))
+            decrypted = AES.new(b'gy1t#b@jl(b$wtme', AES.MODE_CBC, iv).decrypt(cipher_bytes)
             padding_length = decrypted[-1]
-            if (
-                1 <= padding_length <= self.BLOCK_SIZE
-                and decrypted.endswith(bytes([padding_length]) * padding_length)
-            ):
+            if 1 <= padding_length <= self.BLOCK_SIZE:
                 decrypted = decrypted[:-padding_length]
+            value = decrypted.decode("utf-8").strip()
+            if value:
+                return value
+        except (IndexError, ValueError, AttributeError, TypeError,
+                UnicodeDecodeError, binascii.Error):
+            pass
 
-            return decrypted.decode("utf-8")
-        except (
-            IndexError,
-            ValueError,
-            AttributeError,
-            TypeError,
-            UnicodeDecodeError,
-            binascii.Error,
-        ):
+        try:
+            legacy = base64.b64decode(encrypted_data + ("=" * (-len(encrypted_data) % 4)))
+            decrypted = AES.new(
+                b'g@1n!(f1#r.0$)&%', AES.MODE_CBC, b'asd!@#!@#@!12312'
+            ).decrypt(legacy).decode("utf-8")
+            padding_length = ord(decrypted[-1])
+            return decrypted[:-padding_length] if 1 <= padding_length <= self.BLOCK_SIZE else decrypted
+        except (IndexError, ValueError, AttributeError, TypeError,
+                UnicodeDecodeError, binascii.Error):
             return ""
 
     async def findArtistNames(self, results: list) -> str:

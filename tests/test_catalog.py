@@ -9,6 +9,7 @@ from api.catalog.normalize import album, artist, song
 from api.catalog.service import CatalogService, LanguageCatalog
 from api.cache.redis_cache import RedisCache
 from api.catalog.search.ranking import rank
+from api.provider_search import encoded_query, search_entries
 
 
 class FakeCatalog:
@@ -127,6 +128,13 @@ def test_movie_search_keeps_tamil_soundtrack_album_with_same_title():
     results = rank("sarkar", values, "album", 10)
 
     assert {item["id"] for item in results} == {"sarkar-hindi", "sarkar-tamil"}
+
+
+def test_provider_search_accepts_new_result_envelope_and_encodes_query():
+    assert encoded_query("Jilla songs") == "Jilla%20songs"
+    assert search_entries({"data": {"results": [{"seokey": "jilla-song"}]}}) == [
+        {"seokey": "jilla-song"}
+    ]
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,13 @@
+from api.provider_search import encoded_query, search_entries
+
 class Playlists:
     async def search_playlists(self, search_query: str, limit: int) -> list:
         result = await self._safe_request(
-            "POST", self.api_endpoints.search_playlists_url + search_query
+            "POST", self.api_endpoints.search_playlists_url + encoded_query(search_query)
         )
         if isinstance(result, dict) and "error" in result:
             return result
-        entries = (result.get("gr") or [{}])[0].get("gd", [])
+        entries = search_entries(result)
         playlists = []
         for entry in entries[:limit]:
             if not isinstance(entry, dict):

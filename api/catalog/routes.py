@@ -179,7 +179,9 @@ async def home(
     recommendations=Depends(get_personalization_service),
 ):
     cache = getattr(request.app.state, "cache", None)
-    key = f"home:{user.uid}:{type}:{limit}:{cursor or '0'}"
+    # Artwork normalization changed from artist-card images to track/album
+    # artwork. Version the cache key so old home cards cannot survive deploy.
+    key = f"home:v2:{user.uid}:{type}:{limit}:{cursor or '0'}"
     if cache and not refresh:
         cached = await cache.get(key)
         if cached is not None:

@@ -123,7 +123,7 @@ async def delete_current_account(request: Request, user: AuthenticatedUser = Dep
 @router.get("/home")
 async def home(request: Request, refresh: bool = False, limit: int = Query(24, ge=1, le=50), cursor: str | None = Query(None, max_length=100), type: str = Query("all", pattern="^(all|song|album|artist|playlist)$"), user: AuthenticatedUser = Depends(get_current_user), repository=Depends(get_user_repository), recommendations=Depends(get_personalization_service)):
     cache = getattr(request.app.state, "cache", None)
-    key = f"home:{user.uid}:{type}:{limit}:{cursor or '0'}"
+    key = f"home:v2:{user.uid}:{type}:{limit}:{cursor or '0'}"
     if cache and not refresh:
         cached = await cache.get(key)
         if cached is not None:

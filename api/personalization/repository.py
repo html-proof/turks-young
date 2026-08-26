@@ -430,18 +430,11 @@ class PostgresUserRepository:
 
     async def replace_language_preferences(self, uid: str, language_ids: list[str], names: list[str]) -> None:
         async with self._pool.acquire() as conn:
+            # Language preferences are already modeled on user_profiles. Keep
+            # this write compatible with the deployed schema; the optional
+            # normalized languages/user_languages tables are not required by
+            # the catalog and are not present in existing installations.
             async with conn.transaction():
-                for language_id, name in zip(language_ids, names):
-                    await conn.execute(
-                        "INSERT INTO languages (id, name, native_name) VALUES ($1,$2,$2) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name",
-                        language_id, name,
-                    )
-                await conn.execute("DELETE FROM user_languages WHERE user_id=$1", uid)
-                for language_id in language_ids:
-                    await conn.execute(
-                        "INSERT INTO user_languages (user_id, language_id, weight) VALUES ($1,$2,1) ON CONFLICT (user_id,language_id) DO UPDATE SET updated_at=now()",
-                        uid, language_id,
-                    )
                 await conn.execute(
                     "UPDATE user_profiles SET languages=$2, language_ids=$3, onboarding_step='artist', updated_at=now() WHERE uid=$1",
                     uid, names, language_ids,
