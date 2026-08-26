@@ -42,16 +42,31 @@ class CatalogService:
         languages = self.languages.resolve(language_ids)
         if not languages:
             return []
-        per_language = max(1, limit // len(languages) + 1)
-        results = await asyncio.gather(*[
-            self.catalog.search_artists(language.name, per_language) for language in languages
+        # Fetch trending songs per language; extract artist seokeys from those songs.
+        # Searching by language name yields 0 results (artist search is by name, not language).
+        songs_per_language = max(5, (limit // len(languages) + 1) * 3)
+        trending_results = await asyncio.gather(*[
+            self.catalog.get_trending(language.name, songs_per_language)
+            for language in languages
         ], return_exceptions=True)
-        unique: dict[str, dict[str, Any]] = {}
-        for result in results:
+        seen: set[str] = set()
+        artist_seokeys: list[str] = []
+        for result in trending_results:
             if isinstance(result, Exception):
                 continue
-            for value in items(_clean(result), "artist"):
-                unique.setdefault(value["id"], value)
+            for song_item in items(_clean(result), "song"):
+                for art in (song_item.get("artists") or []):
+                    seokey = art.get("id")
+                    if seokey and seokey not in seen:
+                        seen.add(seokey)
+                        artist_seokeys.append(seokey)
+        if not artist_seokeys:
+            return []
+        fetch_keys = artist_seokeys[: limit * 2]
+        artist_result = _clean(await self.catalog.get_artist_info(fetch_keys, False))
+        unique: dict[str, dict[str, Any]] = {}
+        for value in items(artist_result, "artist"):
+            unique.setdefault(value["id"], value)
         return list(unique.values())[:limit]
 
     async def search(self, query: str, kind: str | None, page: int, limit: int) -> dict[str, Any]:
@@ -93,16 +108,14 @@ class CatalogService:
         if not self.languages.languages:
             return []
         language = self.languages.languages[0]
-        trending, releases, artists_result = await asyncio.gather(
+        trending, releases = await asyncio.gather(
             self.catalog.get_trending(language.name, limit),
             self.catalog.get_new_releases(language.name, limit),
-            self.catalog.search_artists(language.name, limit),
             return_exceptions=True,
         )
         candidates = [
             ("trending", "songs", trending, "song"),
             ("new_releases", "albums", releases, "album"),
-            ("popular_artists", "artists", artists_result, "artist"),
         ]
         sections = []
         for section_id, section_type, result, item_type in candidates:
