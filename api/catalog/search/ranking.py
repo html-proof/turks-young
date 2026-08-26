@@ -52,10 +52,31 @@ def _similarity(query: str, value: str) -> float:
     return max(whole, token / len(q_tokens) if q_tokens else 0.0)
 
 
+_UNOFFICIAL_NOISE = re.compile(
+    r"\b(?:cover|karaoke|instrumental|reverb|lo-?fi|slowed|ringtone|status|dj remix|tribute|short|dialogue promo|whatsapp status)\b",
+    re.I,
+)
+
+_OST_KEYWORDS = re.compile(
+    r"\b(?:original motion picture soundtrack|original soundtrack|ost|soundtrack)\b",
+    re.I,
+)
+
+_KNOWN_OFFICIAL_LABELS = {
+    "sony music", "t-series", "saregama", "universal music", "warner music",
+    "zee music", "lahari music", "think music", "muzik247", "satyam audios",
+    "manorama music", "v cinemas", "star music", "aditya music", "rafa international",
+    "speed records", "yrf music", "tips", "speed audio", "east coast",
+    "millennium audios", "dvocean", "audio video media", "v cinemas international",
+    "speed audio & video", "surya audio", "mango music", "madhu audio",
+}
+
+
 def score(query: str, item: dict[str, Any], kind: str) -> float:
     q = normalize_query(query)
+    query_tokens = set(_tokens(q))
     title, artists, album = _text(item, kind)
-    fields = [(title, 100.0), (artists, 75.0), (album, 55.0)]
+    fields = [(title, 100.0), (artists, 75.0), (album, 65.0)]
     if kind == "artist":
         fields = [(title, 110.0)]
     best = 0.0
@@ -68,13 +89,10 @@ def score(query: str, item: dict[str, Any], kind: str) -> float:
         elif normalized.startswith(q):
             best = max(best, weight * 0.85)
         elif all(token in _tokens(normalized) for token in _tokens(q)):
-            best = max(best, weight * 0.70)
+            best = max(best, weight * 0.75)
         else:
-            # Fuzzy matching is intentionally gated by the endpoint's candidate
-            # retrieval; once a provider returns a near match, retain enough
-            # signal for common misspellings such as "arjit sing".
-            best = max(best, weight * 0.75 * _similarity(q, normalized))
-    query_tokens = set(_tokens(q))
+            best = max(best, weight * 0.70 * _similarity(q, normalized))
+
     combined_tokens = set(_tokens(f"{title} {artists} {album}"))
     if len(query_tokens) > 1:
         matched_tokens = query_tokens & combined_tokens
@@ -84,12 +102,31 @@ def score(query: str, item: dict[str, Any], kind: str) -> float:
             best += (len(matched_tokens) / len(query_tokens)) * 30.0
         if query_tokens & set(_tokens(title)) and query_tokens & set(_tokens(artists)):
             best += 25.0
+
+    # 1. Soundtrack / Album match boost (e.g. searching "pattalam", "operation java", "jilla")
+    norm_album = normalize_query(album)
+    clean_album = _OST_KEYWORDS.sub("", norm_album).strip()
+    if clean_album and (clean_album == q or clean_album.startswith(q)):
+        best = max(best, 85.0)
+        if _OST_KEYWORDS.search(norm_album) or _OST_KEYWORDS.search(title):
+            best += 10.0
+
+    # 2. Official Record Label Boost
+    label = str(item.get("label") or "").lower().strip()
+    if any(known in label for known in _KNOWN_OFFICIAL_LABELS):
+        best += 12.0
+
+    # 3. Unofficial / Noise penalty (karaoke, bedroom covers, slowed reverb, ringtones, status)
+    if not _UNOFFICIAL_NOISE.search(q):
+        if _UNOFFICIAL_NOISE.search(title) or _UNOFFICIAL_NOISE.search(norm_album):
+            best -= 45.0
+
     popularity = item.get("popularity_score") or item.get("popularity") or 0
     try:
-        best += min(float(popularity), 1.0) * 12.0
+        best += min(float(popularity), 1.0) * 10.0
     except (TypeError, ValueError):
         pass
-    return best
+    return max(best, 0.0)
 
 
 def _strong_match(query: str, item: dict[str, Any], kind: str) -> bool:
