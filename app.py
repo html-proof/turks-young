@@ -303,8 +303,6 @@ async def songs_info(
     seokey = seokey or query
     if not seokey:
         raise HTTPException(status_code=422, detail="seokey or query is required")
-    if not re.search(r"[a-zA-Z]", seokey):
-        raise HTTPException(status_code=400, detail="seokey must contain at least one alphabetic character")
     gaana = _gaana(request)
     cache = _cache(request)
     key = f"songs:info:{seokey}"
