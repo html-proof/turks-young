@@ -876,6 +876,84 @@ class CatalogService:
             config.STALE_CACHE_TTL if hasattr(config, "STALE_CACHE_TTL") else 3600,
         )
 
+    async def album_details(self, album_id: str) -> dict[str, Any] | None:
+        album_id = (album_id or "").strip()
+        if not album_id:
+            return None
+
+        async def load():
+            # 1. Try get_album_info by seokey or numeric id
+            try:
+                raw = await self.catalog.get_album_info([album_id], True)
+                if isinstance(raw, list) and raw:
+                    first = raw[0]
+                    if isinstance(first, dict) and (first.get("tracks") or first.get("title") or first.get("name")):
+                        return album(first)
+                elif isinstance(raw, dict) and (raw.get("tracks") or raw.get("title") or raw.get("name")):
+                    return album(raw)
+            except Exception as exc:
+                logger.warning("get_album_info failed id=%s error=%s", album_id, exc)
+
+            # 2. Try searching albums by clean query
+            search_query = album_id.replace("-", " ").replace("_", " ")
+            try:
+                search_res = await self.catalog.search_albums(search_query, 5)
+                album_items = items(_clean(search_res), "album")
+                for candidate in album_items:
+                    cand_id = str(candidate.get("id") or candidate.get("seokey") or "")
+                    if cand_id and (cand_id.lower() == album_id.lower() or normalize_query(cand_id) == normalize_query(album_id)):
+                        try:
+                            full_raw = await self.catalog.get_album_info([cand_id], True)
+                            if isinstance(full_raw, list) and full_raw:
+                                return album(full_raw[0])
+                            elif isinstance(full_raw, dict):
+                                return album(full_raw)
+                        except Exception:
+                            pass
+                        return album(candidate)
+            except Exception as exc:
+                logger.warning("search_albums fallback failed query=%s error=%s", search_query, exc)
+
+            # 3. Try finding songs belonging to this album
+            try:
+                song_search = await self.catalog.search_songs(search_query, 25)
+                song_items = [song(s) for s in items(_clean(song_search), "song") if isinstance(s, dict)]
+                matching_songs = [
+                    s for s in song_items
+                    if (s.get("album_id") == album_id or s.get("album_seokey") == album_id or
+                        normalize_query(str(s.get("album") or "")) == normalize_query(search_query))
+                ]
+                if matching_songs:
+                    first = matching_songs[0]
+                    return {
+                        "id": album_id,
+                        "seokey": album_id,
+                        "provider_id": first.get("album_id") or album_id,
+                        "type": "album",
+                        "title": first.get("album") or search_query,
+                        "name": first.get("album") or search_query,
+                        "image_url": first.get("image_url") or "",
+                        "imageUrl": first.get("image_url") or "",
+                        "artworkUrl": first.get("image_url") or "",
+                        "artist": first.get("artist") or "",
+                        "artists": [{"name": first.get("artist") or "", "id": first.get("artist_ids") or ""}],
+                        "track_count": len(matching_songs),
+                        "trackCount": len(matching_songs),
+                        "tracks": matching_songs,
+                        "songs": matching_songs,
+                    }
+            except Exception as exc:
+                logger.warning("search_songs fallback failed query=%s error=%s", search_query, exc)
+
+            return None
+
+        return await self._cached(
+            f"catalog:album:{album_id}",
+            config.TTL_ALBUM if hasattr(config, "TTL_ALBUM") else 21600,
+            load,
+            config.STALE_CACHE_TTL if hasattr(config, "STALE_CACHE_TTL") else 3600,
+        )
+
     async def home_page(
         self,
         uid: str,

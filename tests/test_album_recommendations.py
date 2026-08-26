@@ -137,3 +137,14 @@ async def test_album_recommendations_deduplication(service, mock_catalog):
     assert "test-album-1-ost" not in rec_ids
     # "Arijit Superhit" duplicate variant should appear only once
     assert len([t for t in rec_titles if "Arijit Superhit" in t]) == 1
+
+
+@pytest.mark.asyncio
+async def test_album_details_success(service, mock_catalog):
+    res = await service.album_details("test-album-1")
+    assert res is not None
+    assert res["id"] == "test-album-1"
+    assert res["title"] == "Test Album 1"
+    assert len(res["tracks"]) == 1
+    assert res["tracks"][0]["title"] == "Song 1"
+
