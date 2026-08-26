@@ -433,12 +433,15 @@ class CatalogService:
             ),
             reverse=True,
         )
-        matched_albums = matched_albums[:10]
+        matched_albums = matched_albums[:6]
         extra_songs: list[dict[str, Any]] = []
         if matched_albums and hasattr(self.catalog, "get_album_info"):
             async def soundtrack_tracks(item):
                 try:
-                    details = await self.catalog.get_album_info([str(item["id"])], True)
+                    details = await asyncio.wait_for(
+                        self.catalog.get_album_info([str(item["id"])], True),
+                        timeout=3.5,
+                    )
                     if isinstance(details, list) and details and isinstance(details[0], dict):
                         return album(details[0]).get("songs") or []
                 except Exception as exc:
@@ -461,7 +464,10 @@ class CatalogService:
         if matched_artists and hasattr(self.catalog, "get_top_tracks"):
             async def artist_top_tracks(item):
                 try:
-                    res = await self.catalog.get_top_tracks(str(item["id"]), limit=15)
+                    res = await asyncio.wait_for(
+                        self.catalog.get_top_tracks(str(item["id"]), limit=15),
+                        timeout=3.5,
+                    )
                     if isinstance(res, dict) and "tracks" in res:
                         return items(res["tracks"], "song")
                     elif isinstance(res, list):
