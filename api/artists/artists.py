@@ -62,6 +62,7 @@ class Artists:
         entities = []
         entities_list = result.get('entities', [])
         for i in range(min(limit, len(entities_list))):
+            entities.append(entities_list[i])
         if len(entities) == 0:
             return await errors.no_results()
         similar_artists = []
