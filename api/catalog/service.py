@@ -474,14 +474,14 @@ class CatalogService:
             ),
             reverse=True,
         )
-        matched_albums = matched_albums[:6]
+        matched_albums = matched_albums[:2]
         extra_songs: list[dict[str, Any]] = []
         if matched_albums and hasattr(self.catalog, "get_album_info"):
             async def soundtrack_tracks(item):
                 try:
                     details = await asyncio.wait_for(
                         self.catalog.get_album_info([str(item["id"])], True),
-                        timeout=3.5,
+                        timeout=1.5,
                     )
                     if isinstance(details, list) and details and isinstance(details[0], dict):
                         return album(details[0]).get("songs") or []
@@ -501,13 +501,13 @@ class CatalogService:
         matched_artists = [
             item for item in grouped.get("artists", [])
             if _strong_match(normalized_query, item, "artist")
-        ][:3]
+        ][:1]
         if matched_artists and hasattr(self.catalog, "get_top_tracks"):
             async def artist_top_tracks(item):
                 try:
                     res = await asyncio.wait_for(
-                        self.catalog.get_top_tracks(str(item["id"]), limit=15),
-                        timeout=3.5,
+                        self.catalog.get_top_tracks(str(item["id"]), limit=10),
+                        timeout=1.5,
                     )
                     if isinstance(res, dict) and "tracks" in res:
                         return items(res["tracks"], "song")
@@ -524,10 +524,10 @@ class CatalogService:
 
         # Deep scan 3: Multi-word query fallback when direct song search is sparse
         query_words = [w for w in normalized_query.split() if len(w) > 2]
-        if len(query_words) > 1 and len(grouped.get("songs", [])) < 4:
+        if len(query_words) > 1 and len(grouped.get("songs", [])) < 2:
             async def sub_search(w):
                 try:
-                    return items(_clean(await self.catalog.search_songs(w, 10)), "song")
+                    return items(_clean(await asyncio.wait_for(self.catalog.search_songs(w, 8), timeout=1.2)), "song")
                 except Exception:
                     return []
             sub_res = await asyncio.gather(*(sub_search(w) for w in query_words))
