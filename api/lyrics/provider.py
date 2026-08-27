@@ -23,14 +23,64 @@ class LyricsProvider(abc.ABC):
 
 
 _NOISE = re.compile(
-    r"\s*[\[(](?:official\s+(?:audio|video)|lyric\s+video)[\])]",
+    r"\s*[\[(](?:official\s+(?:audio|video)|lyric\s+video|official\s+lyric\s+video)[\])]",
     flags=re.IGNORECASE,
 )
 _SPACE = re.compile(r"\s+")
 
 
 def normalize_track_name(name: str) -> str:
+    """Basic track name normalization preserving version markers for backward compatibility."""
     return _SPACE.sub(" ", _NOISE.sub("", name)).strip()
+
+
+def clean_song_title(title: str) -> str:
+    """Aggressively clean movie names, version suffixes, and noisy bracketed tags for search matching."""
+    cleaned = str(title or "").strip()
+    patterns = [
+        # (From "Movie"), [From "Movie"], (From Movie), [From The Film ...]
+        r"\s*[\(\[](?:from\s+[\"']?[^\)\]]+[\"']?|from\s+the\s+(?:movie|film)\s+[\"']?[^\)\]]+[\"']?)[\]\)]",
+        # (feat. ...), (ft. ...)
+        r"\s*[\(\[](?:feat\.?|ft\.?)[^\)\]]+[\]\)]",
+        # (Official ...), (Lyric ...), (Audio), (Video), (Full Song), (Lyrical)
+        r"\s*[\(\[](?:official[^\)\]]*|lyric[^\)\]]*|audio|video|full\s+song|lyrical[^\)\]]*|song)[\]\)]",
+        # (Original Motion Picture Soundtrack), (Soundtrack), (OST)
+        r"\s*[\(\[](?:original\s+(?:motion\s+picture\s+)?soundtrack|soundtrack|ost)[\]\)]",
+        # [Malayalam], (Telugu), (Tamil), (Hindi), (Kannada), (Punjabi), (English)
+        r"\s*[\(\[](?:malayalam|telugu|tamil|hindi|kannada|punjabi|bengali|marathi|english|arabic|instrumental)[\]\)]",
+        # - From "Movie" / - Reprise / - Remix / - Title Track / - Lyrical
+        r"\s*-\s*(?:from\s+[^\-]+|reprise|remix|title\s+track|official[^\-]*|lyrical[^\-]*|original\s+soundtrack|theme|promo|full\s+song).*",
+    ]
+    for p in patterns:
+        cleaned = re.sub(p, "", cleaned, flags=re.IGNORECASE)
+    cleaned = _SPACE.sub(" ", cleaned).strip()
+    cleaned = re.sub(r"[\s\-_–—:]+$", "", cleaned).strip()
+    return cleaned if cleaned else title
+
+
+def get_primary_artist(artists: Any) -> str:
+    if isinstance(artists, list):
+        if not artists:
+            return ""
+        first = artists[0]
+        if isinstance(first, dict):
+            return str(first.get("name") or first.get("title") or "").strip()
+        return str(first).strip()
+    s = str(artists or "").strip()
+    parts = re.split(r",|&|/|(?:\s+(?:feat\.?|ft\.?|with)\s+)", s, flags=re.IGNORECASE)
+    return parts[0].strip() if parts else s
+
+
+def get_all_artist_string(artists: Any) -> str:
+    if isinstance(artists, list):
+        names = []
+        for a in artists:
+            if isinstance(a, dict):
+                names.append(str(a.get("name") or a.get("title") or ""))
+            else:
+                names.append(str(a))
+        return ", ".join([n.strip() for n in names if n.strip()])
+    return str(artists or "").strip()
 
 
 def _comparable(value: Any) -> str:
@@ -39,22 +89,68 @@ def _comparable(value: Any) -> str:
 
 
 def _similarity(left: Any, right: Any) -> float:
-    return SequenceMatcher(None, _comparable(left), _comparable(right)).ratio()
+    l_str = _comparable(left)
+    r_str = _comparable(right)
+    if not l_str or not r_str:
+        return 0.0
+    if l_str == r_str:
+        return 1.0
+    return SequenceMatcher(None, l_str, r_str).ratio()
 
 
 def _candidate_score(candidate: dict[str, Any], track: dict[str, Any]) -> int:
-    score = round(40 * _similarity(candidate.get("trackName"), track.get("title")))
-    score += round(40 * _similarity(candidate.get("artistName"), track.get("artists")))
+    cand_title = candidate.get("trackName") or ""
+    cand_artist = candidate.get("artistName") or ""
+    target_title = track.get("title") or ""
+    target_clean = clean_song_title(target_title)
+    target_artist = get_all_artist_string(track.get("artists"))
+    primary_artist = get_primary_artist(target_artist)
+
+    # 1. Title Similarity (0 to 45 pts)
+    title_sim = max(
+        _similarity(cand_title, target_title),
+        _similarity(cand_title, target_clean),
+        _similarity(clean_song_title(cand_title), target_clean),
+    )
+    score = round(45 * title_sim)
+
+    # 2. Artist Similarity (0 to 35 pts)
+    cand_art_comp = _comparable(cand_artist)
+    prim_art_comp = _comparable(primary_artist)
+    all_art_comp = _comparable(target_artist)
+    
+    is_contained = (
+        (prim_art_comp and len(prim_art_comp) >= 3 and (prim_art_comp in cand_art_comp or cand_art_comp in prim_art_comp)) or
+        (cand_art_comp and len(cand_art_comp) >= 3 and cand_art_comp in all_art_comp)
+    )
+    
+    art_sim = max(
+        _similarity(cand_artist, target_artist),
+        _similarity(cand_artist, primary_artist),
+        1.0 if is_contained else 0.0,
+    )
+    score += round(35 * art_sim)
+
+    # 3. Album Match (0 to 10 pts)
     if track.get("album") and candidate.get("albumName"):
         score += round(10 * _similarity(candidate.get("albumName"), track.get("album")))
-    candidate_duration = candidate.get("duration")
-    duration = track.get("duration_seconds")
-    if candidate_duration is not None and duration is not None:
-        difference = abs(float(candidate_duration) - float(duration))
-        if difference <= 2:
+
+    # 4. Duration match (0 to 10 pts)
+    cand_dur = candidate.get("duration")
+    target_dur = track.get("duration_seconds")
+    if cand_dur is not None and target_dur and float(target_dur) > 0:
+        diff = abs(float(cand_dur) - float(target_dur))
+        if diff <= 3:
             score += 10
-        elif difference <= 5:
+        elif diff <= 8:
             score += 5
+        elif diff > 35:
+            score -= 15
+
+    # 5. Synced lyrics bonus (+5 pts)
+    if candidate.get("syncedLyrics"):
+        score += 5
+
     return score
 
 
@@ -91,29 +187,91 @@ class LRCLibProvider(LyricsProvider):
             raise LyricsProviderError("Lyrics provider is unavailable") from exc
 
     async def get_lyrics(self, track: dict[str, Any]) -> dict[str, Any] | None:
-        base_params = {
-            "track_name": normalize_track_name(track["title"]),
-            "artist_name": track["artists"],
-        }
+        title = track.get("title", "").strip()
+        artists = get_all_artist_string(track.get("artists"))
+        primary_artist = get_primary_artist(artists)
+        clean_title = clean_song_title(title)
         duration = track.get("duration_seconds")
-        exact_params = {**base_params, "duration": duration} if duration else None
-        if exact_params and track.get("album"):
-            exact = await self._request("get", {**exact_params, "album_name": track["album"]})
-            if exact:
-                return exact
+        album = str(track.get("album") or "").strip()
 
-        if exact_params:
-            exact = await self._request("get", exact_params)
-            if exact:
-                return exact
+        # Step 1: Direct exact get endpoint with album and duration
+        if title and artists:
+            if duration and album:
+                exact = await self._request("get", {
+                    "track_name": normalize_track_name(title),
+                    "artist_name": artists,
+                    "album_name": album,
+                    "duration": duration,
+                })
+                if exact and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("instrumental")):
+                    return exact
 
-        candidates = await self._request("search", {
-            "track_name": base_params["track_name"],
-            "artist_name": base_params["artist_name"],
-        })
-        if not isinstance(candidates, list):
+            if duration:
+                exact = await self._request("get", {
+                    "track_name": normalize_track_name(title),
+                    "artist_name": artists,
+                    "duration": duration,
+                })
+                if exact and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("instrumental")):
+                    return exact
+
+            if clean_title != title and primary_artist and duration:
+                exact = await self._request("get", {
+                    "track_name": clean_title,
+                    "artist_name": primary_artist,
+                    "duration": duration,
+                })
+                if exact and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("instrumental")):
+                    return exact
+
+        # Step 2: Multi-query Search
+        search_queries: list[dict[str, str]] = []
+        if clean_title and primary_artist:
+            search_queries.append({"track_name": clean_title, "artist_name": primary_artist})
+            search_queries.append({"q": f"{clean_title} {primary_artist}"})
+        if title and artists and (title != clean_title or artists != primary_artist):
+            search_queries.append({"track_name": normalize_track_name(title), "artist_name": artists})
+        if clean_title:
+            search_queries.append({"q": clean_title})
+
+        all_candidates: list[dict[str, Any]] = []
+        seen_ids = set()
+
+        for query_params in search_queries:
+            try:
+                candidates = await self._request("search", query_params)
+                if isinstance(candidates, list):
+                    for cand in candidates:
+                        cand_id = cand.get("id")
+                        if cand_id and cand_id not in seen_ids:
+                            seen_ids.add(cand_id)
+                            all_candidates.append(cand)
+                if all_candidates:
+                    best = max(all_candidates, key=lambda item: _candidate_score(item, track))
+                    if _candidate_score(best, track) >= 75 and best.get("syncedLyrics"):
+                        return best
+            except (LyricsRateLimited, LyricsProviderError):
+                raise
+            except Exception:
+                pass
+
+        if not all_candidates:
             return None
-        ranked = sorted(candidates, key=lambda item: _candidate_score(item, track), reverse=True)
-        if not ranked or _candidate_score(ranked[0], track) < 80:
+
+        # Filter and rank candidates
+        valid_candidates = [
+            c for c in all_candidates
+            if c.get("syncedLyrics") or c.get("plainLyrics") or c.get("instrumental")
+        ]
+        if not valid_candidates:
             return None
-        return ranked[0]
+
+        ranked = sorted(valid_candidates, key=lambda item: _candidate_score(item, track), reverse=True)
+        best = ranked[0]
+        score = _candidate_score(best, track)
+
+        min_threshold = 40 if best.get("syncedLyrics") else 45
+        if score < min_threshold:
+            return None
+        return best
+

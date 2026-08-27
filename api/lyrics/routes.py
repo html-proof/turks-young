@@ -7,21 +7,49 @@ from api.lyrics.provider import LyricsProviderError, LyricsRateLimited
 
 
 router = APIRouter(tags=["lyrics"])
-SEO_KEY = r"^[a-z0-9\-]+$"
+SEO_KEY = r"^[a-zA-Z0-9\-_.%]+$"
 
 
-async def _lyrics_for_track(request: Request, track_id: str):
+async def _lyrics_for_track(
+    request: Request,
+    track_id: str,
+    title: str | None = None,
+    artist: str | None = None,
+):
     cache = getattr(request.app.state, "cache", None)
     cache_key = f"songs:info:{track_id}"
     tracks = await cache.get(cache_key) if cache else None
     if tracks is None:
-        tracks = await request.app.state.gaanapy.get_track_info([track_id])
-        if cache and not (isinstance(tracks, dict) and "error" in tracks):
-            await cache.set(cache_key, tracks, config.TTL_SONG)
-    if (isinstance(tracks, dict) and "error" in tracks) or not tracks:
+        try:
+            tracks = await request.app.state.gaanapy.get_track_info([track_id])
+            if cache and not (isinstance(tracks, dict) and "error" in tracks):
+                await cache.set(cache_key, tracks, config.TTL_SONG)
+        except Exception:
+            tracks = None
+
+    track_data = None
+    if tracks and not (isinstance(tracks, dict) and "error" in tracks):
+        track_data = tracks[0] if isinstance(tracks, list) and tracks else tracks
+
+    if not track_data and (title or track_id):
+        track_data = {
+            "seokey": track_id,
+            "title": title or track_id.replace("-", " ").title(),
+            "artists": artist or "",
+            "album": "",
+            "duration": 0,
+        }
+
+    if not track_data:
         raise HTTPException(status_code=404, detail="Track not found")
+
+    if title and not track_data.get("title"):
+        track_data["title"] = title
+    if artist and not (track_data.get("artists") or track_data.get("artist")):
+        track_data["artists"] = artist
+
     try:
-        return await request.app.state.lyrics_service.get_lyrics(tracks[0])
+        return await request.app.state.lyrics_service.get_lyrics(track_data)
     except LyricsRateLimited as exc:
         return JSONResponse(
             status_code=429,
@@ -40,8 +68,10 @@ async def _lyrics_for_track(request: Request, track_id: str):
 async def get_track_lyrics(
     request: Request,
     track_id: str = Path(..., min_length=1, max_length=200, pattern=SEO_KEY),
+    title: str | None = None,
+    artist: str | None = None,
 ):
-    return await _lyrics_for_track(request, track_id)
+    return await _lyrics_for_track(request, track_id, title=title, artist=artist)
 
 
 @router.get(
@@ -52,5 +82,7 @@ async def get_track_lyrics(
 async def get_track_lyrics_legacy(
     request: Request,
     track_id: str = Path(..., min_length=1, max_length=200, pattern=SEO_KEY),
+    title: str | None = None,
+    artist: str | None = None,
 ):
-    return await _lyrics_for_track(request, track_id)
+    return await _lyrics_for_track(request, track_id, title=title, artist=artist)

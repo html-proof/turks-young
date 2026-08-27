@@ -3,7 +3,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from api.lyrics.lrc import parse_lrc
-from api.lyrics.provider import _candidate_score, normalize_track_name
+from api.lyrics.provider import (
+    _candidate_score,
+    clean_song_title,
+    get_primary_artist,
+    normalize_track_name,
+)
 from api.lyrics.service import LyricsService, duration_seconds
 
 
@@ -37,6 +42,16 @@ def test_track_name_cleanup_preserves_version_markers():
     assert normalize_track_name("Song (Official Audio)") == "Song"
     assert normalize_track_name("Song (Live)") == "Song (Live)"
     assert normalize_track_name("Song [Remix]") == "Song [Remix]"
+
+
+def test_clean_song_title_and_primary_artist():
+    assert clean_song_title('Tum Hi Ho (From "Aashiqui 2")') == "Tum Hi Ho"
+    assert clean_song_title("Kesariya (From Brahmastra)") == "Kesariya"
+    assert clean_song_title("Arabic Kuthu - Halamithi Habibo (From \"Beast\")") == "Arabic Kuthu - Halamithi Habibo"
+    assert clean_song_title("Ente Khalbile - Reprise") == "Ente Khalbile"
+    assert clean_song_title("Jimikki Kammal [Malayalam]") == "Jimikki Kammal"
+    assert get_primary_artist("Arijit Singh, Mithoon, Shreya Ghoshal") == "Arijit Singh"
+    assert get_primary_artist([{"name": "Anirudh Ravichander"}, {"name": "Jonita Gandhi"}]) == "Anirudh Ravichander"
 
 
 def test_candidate_score_rejects_wrong_version_duration():
