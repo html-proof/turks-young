@@ -12,8 +12,28 @@ def _upgrade_image_quality(url: str | None) -> str | None:
         return None
     if url.startswith("http://"):
         url = "https://" + url[7:]
-    # Upgrade low-res thumbnail dimensions to 500x500 HD
-    url = re.sub(r'[-_](?:50x50|80x80|150x150|250x250|320x320)(\.[a-zA-Z0-9]+)$', r'-500x500\1', url)
+
+    # Gaana artwork size upgrades (size_s, size_m, size_xs -> size_l)
+    url = re.sub(r'size_[smx]+(\.(?:jpg|jpeg|png|webp))', r'size_l\1', url, flags=re.IGNORECASE)
+    url = re.sub(r'img_[smx]+(\.(?:jpg|jpeg|png|webp))', r'img_l\1', url, flags=re.IGNORECASE)
+
+    # JioSaavn / Saavn and standard CDNs: 50x50, 150x150, 250x250, 320x320 -> 500x500 HD
+    url = re.sub(r'[-_](?:50x50|80x80|150x150|250x250|320x320)(\.[a-zA-Z0-9]+)$', r'-500x500\1', url, flags=re.IGNORECASE)
+    url = re.sub(r'/(?:50x50|80x80|150x150|250x250|320x320)/', r'/500x500/', url, flags=re.IGNORECASE)
+    url = re.sub(r'[-_](?:50x50|80x80|150x150|250x250|320x320)([-_/\?])', r'-500x500\1', url, flags=re.IGNORECASE)
+
+    # YouTube thumbnail upgrades
+    url = re.sub(r'/(?:default|mqdefault|sddefault)\.jpg', r'/hqdefault.jpg', url, flags=re.IGNORECASE)
+
+    # Google / Firebase avatars
+    url = re.sub(r'=s(?:96|120|150|200|300)-c', r'=s500-c', url, flags=re.IGNORECASE)
+
+    # Dimension query parameters
+    url = re.sub(r'([?&]w=)(?:50|80|100|150|200|250|300)', r'\g<1>500', url, flags=re.IGNORECASE)
+    url = re.sub(r'([?&]width=)(?:50|80|100|150|200|250|300)', r'\g<1>500', url, flags=re.IGNORECASE)
+    url = re.sub(r'([?&]h=)(?:50|80|100|150|200|250|300)', r'\g<1>500', url, flags=re.IGNORECASE)
+    url = re.sub(r'([?&]height=)(?:50|80|100|150|200|250|300)', r'\g<1>500', url, flags=re.IGNORECASE)
+
     return url
 
 

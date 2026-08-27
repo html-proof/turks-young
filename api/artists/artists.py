@@ -62,7 +62,6 @@ class Artists:
         entities = []
         entities_list = result.get('entities', [])
         for i in range(min(limit, len(entities_list))):
-            entities.append(entities_list[i])
         if len(entities) == 0:
             return await errors.no_results()
         similar_artists = []
@@ -90,10 +89,12 @@ class Artists:
         data['favorite_count'] = artist.get('favorite_count', '')
         data['artist_url'] = f"https://gaana.com/artist/{data['seokey']}"
         atw = artist.get('atw', '')
+        large_atw = atw.replace("size_s", "size_l").replace("size_m", "size_l") if atw else ''
         data['images'] = {'urls': {}}
-        data['images']['urls']['large_artwork'] = atw.replace("size_m", "size_l") if atw else ''
-        data['images']['urls']['medium_artwork'] = atw
-        data['images']['urls']['small_artwork'] = atw.replace("size_m", "size_s") if atw else ''
+        data['images']['urls']['large_artwork'] = large_atw
+        data['images']['urls']['medium_artwork'] = large_atw or atw
+        data['images']['urls']['small_artwork'] = atw
+        data['artist_image'] = large_atw or atw
         if info:
             top_tracks_data = await self.get_top_tracks(data['artist_id'], limit, page)
             data['top_tracks'] = top_tracks_data.get('tracks', [])
@@ -117,8 +118,10 @@ class Artists:
         data['favorite_count'] = results.get('favorite_count', '')
         data['artist_url'] = f"https://gaana.com/artist/{data['seokey']}"
         atw = results.get('atw', '')
+        large_atw = atw.replace("size_s", "size_l").replace("size_m", "size_l") if atw else ''
         data['images'] = {'urls': {}}
-        data['images']['urls']['large_artwork'] = atw.replace("size_m", "size_l") if atw else ''
-        data['images']['urls']['medium_artwork'] = atw
-        data['images']['urls']['small_artwork'] = atw.replace("size_m", "size_s") if atw else ''
+        data['images']['urls']['large_artwork'] = large_atw
+        data['images']['urls']['medium_artwork'] = large_atw or atw
+        data['images']['urls']['small_artwork'] = atw
+        data['artist_image'] = large_atw or atw
         return data
