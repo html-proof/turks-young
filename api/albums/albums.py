@@ -6,11 +6,23 @@ class Albums:
     async def search_albums(self, search_query: str, limit: int) -> list:
         endpoints = self.api_endpoints
         errors = self.errors
-        result = await self._safe_request("POST", endpoints.search_albums_url + encoded_query(search_query))
-        if isinstance(result, dict) and "error" in result:
-            return result
+        clean_q = search_query.strip()
+        result = await self._safe_request("POST", endpoints.search_albums_url + encoded_query(clean_q))
+        entries = search_entries(result) if not (isinstance(result, dict) and "error" in result) else []
+
+        if not entries:
+            for expansion in [f"{clean_q} movie", f"{clean_q} songs", f"{clean_q} soundtrack", f"{clean_q} album"]:
+                exp_result = await self._safe_request("POST", endpoints.search_albums_url + encoded_query(expansion))
+                if not (isinstance(exp_result, dict) and "error" in exp_result):
+                    exp_entries = search_entries(exp_result)
+                    if exp_entries:
+                        entries = exp_entries
+                        break
+
+        if len(entries) == 0:
+            return await errors.no_results()
+
         album_ids = []
-        entries = search_entries(result)
         for i in range(min(limit, len(entries))):
             seo = entries[i].get('seo') or entries[i].get('seokey')
             if seo:

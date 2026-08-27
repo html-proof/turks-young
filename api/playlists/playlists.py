@@ -2,12 +2,23 @@ from api.provider_search import encoded_query, search_entries
 
 class Playlists:
     async def search_playlists(self, search_query: str, limit: int) -> list:
+        clean_q = search_query.strip()
         result = await self._safe_request(
-            "POST", self.api_endpoints.search_playlists_url + encoded_query(search_query)
+            "POST", self.api_endpoints.search_playlists_url + encoded_query(clean_q)
         )
-        if isinstance(result, dict) and "error" in result:
-            return result
-        entries = search_entries(result)
+        entries = search_entries(result) if not (isinstance(result, dict) and "error" in result) else []
+
+        if not entries:
+            for expansion in [f"{clean_q} songs", f"{clean_q} hits", f"{clean_q} playlist"]:
+                exp_result = await self._safe_request("POST", self.api_endpoints.search_playlists_url + encoded_query(expansion))
+                if not (isinstance(exp_result, dict) and "error" in exp_result):
+                    exp_entries = search_entries(exp_result)
+                    if exp_entries:
+                        entries = exp_entries
+                        break
+
+        if len(entries) == 0:
+            return await self.errors.no_results()
         playlists = []
         for entry in entries[:limit]:
             if not isinstance(entry, dict):
