@@ -582,15 +582,84 @@ class CatalogService:
     async def artist_details(self, artist_id: str, limit: int) -> dict[str, Any] | None:
         result = _clean(await self.catalog.get_artist_info([artist_id], True, limit, 1))
         if not isinstance(result, list) or not result:
+            # Fallback search if direct seokey lookup failed (e.g. p-jayachandran -> p-jayachandran-1)
+            queries = [
+                artist_id,
+                artist_id.replace('-', ' ').replace('_', ' ').strip(),
+                re.sub(r'^[a-zA-Z][\.\s]+', '', artist_id.replace('-', ' ').replace('_', ' ').strip()),
+            ]
+            for q in queries:
+                if not q:
+                    continue
+                try:
+                    search_res = _clean(await self.catalog.search_artists(q, 5))
+                    if isinstance(search_res, list) and search_res:
+                        for cand in search_res:
+                            cand_seo = cand.get('seokey') or cand.get('id') or cand.get('artist_id')
+                            if cand_seo and str(cand_seo) != artist_id:
+                                cand_info = _clean(await self.catalog.get_artist_info([str(cand_seo)], True, limit, 1))
+                                if isinstance(cand_info, list) and cand_info:
+                                    result = cand_info
+                                    break
+                        if isinstance(result, list) and result:
+                            break
+                except Exception:
+                    pass
+
+        if not isinstance(result, list) or not result:
             return None
         raw = result[0]
         normalized_artist = artist(raw)
         if not normalized_artist["id"] or not normalized_artist["name"]:
             return None
+
+        artist_name = normalized_artist.get("name") or artist_id
+        album_list = []
+        album_queries = [
+            artist_name,
+            re.sub(r'^[a-zA-Z][\.\s]+', '', artist_name).strip(),
+            artist_id.replace('-', ' '),
+        ]
+        seen_album_titles = set()
+        for aq in album_queries:
+            if not aq:
+                continue
+            try:
+                raw_albums = _clean(await self.catalog.search_albums(aq, 10))
+                if isinstance(raw_albums, list):
+                    for a in items(raw_albums, "album"):
+                        title_key = (a.get("name") or a.get("title") or "").lower().strip()
+                        if title_key and title_key not in seen_album_titles:
+                            seen_album_titles.add(title_key)
+                            album_list.append(a)
+            except Exception:
+                pass
+            if len(album_list) >= 8:
+                break
+
+        # Also extract unique albums from top_tracks if needed
+        for t in raw.get("top_tracks", []):
+            alb_id = str(t.get("album_id") or t.get("album_seokey") or "")
+            alb_title = t.get("album") or ""
+            title_key = alb_title.lower().strip()
+            if alb_id and alb_title and title_key not in seen_album_titles:
+                seen_album_titles.add(title_key)
+                album_list.append({
+                    "id": alb_id,
+                    "name": alb_title,
+                    "title": alb_title,
+                    "artist": artist_name,
+                    "image_url": (t.get("images", {}).get("urls", {}).get("large_artwork") or t.get("image_url") or ""),
+                    "images": t.get("images", {}),
+                    "track_count": 0,
+                    "release_date": t.get("release_date", ""),
+                    "language": t.get("language", ""),
+                })
+
         return {
             "artist": normalized_artist,
             "popular_songs": items(raw.get("top_tracks"), "song"),
-            "albums": [],
+            "albums": album_list,
             "singles": [],
             "appears_on": [],
             "related_artists": [],
