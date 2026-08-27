@@ -36,18 +36,44 @@ class Albums:
             return await errors.no_results()
         return album_info
 
-    async def get_album_tracks(self, album_id: str) -> list:
-        endpoints = self.api_endpoints
-        result = await self._safe_request("POST", endpoints.album_details_url + album_id)
-        if isinstance(result, dict) and "error" in result:
-            return result
+    async def get_album_tracks(self, album_id: str, raw_tracks: list = None, album_meta: dict = None) -> list:
+        if raw_tracks is None:
+            endpoints = self.api_endpoints
+            result = await self._safe_request("POST", endpoints.album_details_url + album_id)
+            if isinstance(result, dict) and "error" in result:
+                return result
+            raw_tracks = result.get('tracks') or (result.get('album', {}).get('tracks') if isinstance(result.get('album'), dict) else None) or []
+            if not album_meta and isinstance(result.get('album'), dict):
+                album_meta = result['album']
+
+        if isinstance(raw_tracks, list) and raw_tracks:
+            formatted_tracks = []
+            for t in raw_tracks:
+                if isinstance(t, dict):
+                    if album_meta:
+                        if not t.get('album_title') and album_meta.get('title'):
+                            t['album_title'] = album_meta['title']
+                        if not t.get('albumseokey') and album_meta.get('seokey'):
+                            t['albumseokey'] = album_meta['seokey']
+                        if not t.get('artwork') and album_meta.get('artwork'):
+                            t['artwork'] = album_meta['artwork']
+                    if t.get('seokey'):
+                        formatted = await self.format_json_songs(t)
+                        if isinstance(formatted, dict) and 'error' not in formatted:
+                            formatted_tracks.append(formatted)
+            if formatted_tracks:
+                return formatted_tracks
+
         track_seokeys = []
-        for i in result.get('tracks', []):
-            seo = i.get('seokey') if isinstance(i, dict) else None
+        for i in raw_tracks:
+            seo = i.get('seokey') or i.get('seo') if isinstance(i, dict) else None
             if seo:
                 track_seokeys.append(seo)
-        result = await self.get_track_info(track_seokeys)
-        return result
+        if track_seokeys:
+            result = await self.get_track_info(track_seokeys)
+            if isinstance(result, list):
+                return result
+        return []
 
     async def format_json_albums(self, results: dict, info: bool = False) -> dict:
         functions = self.functions
@@ -91,5 +117,6 @@ class Albums:
         data['images']['urls']['small_artwork'] = artwork
 
         if info:
-            data['tracks'] = await self.get_album_tracks(data['seokey'])
+            raw_tracks = results.get('tracks') or (album.get('tracks') if isinstance(album, dict) else None) or []
+            data['tracks'] = await self.get_album_tracks(data['seokey'], raw_tracks=raw_tracks, album_meta=album)
         return data

@@ -48,9 +48,9 @@ class Songs:
             return await errors.invalid_seokey()
 
         data['seokey'] = seokey
-        data['album_seokey'] = results.get('albumseokey', '')
-        data['track_id'] = results.get('track_id', '')
-        data['title'] = results.get('track_title', '')
+        data['album_seokey'] = results.get('albumseokey') or results.get('album_seokey') or ''
+        data['track_id'] = str(results.get('track_id') or results.get('id') or '')
+        data['title'] = results.get('track_title') or results.get('title') or ''
         data['artists'] = await functions.findArtistNames(
             results.get('artist') or []
         )
@@ -66,8 +66,8 @@ class Songs:
             if artist_detail and isinstance(artist_detail, list) and len(artist_detail) > 0
             else ''
         )
-        data['album'] = results.get('album_title', '')
-        data['album_id'] = results.get('album_id', '')
+        data['album'] = results.get('album_title') or results.get('album') or ''
+        data['album_id'] = str(results.get('album_id') or '')
         data['duration'] = results.get('duration', '')
         data['popularity'] = results.get('popularity', '')
         data['genres'] = await functions.findGenres(
@@ -77,7 +77,7 @@ class Songs:
             results.get('parental_warning', 0)
         )
         data['language'] = results.get('language', '')
-        data['label'] = results.get('vendor_name', '')
+        data['label'] = results.get('vendor_name') or results.get('recordlevel') or ''
         data['release_date'] = results.get('release_date', '')
         data['play_count'] = results.get('play_ct', '')
         data['favorite_count'] = results.get('total_favourite_count', '')
@@ -86,10 +86,11 @@ class Songs:
             f"https://gaana.com/album/{data['album_seokey']}"
             if data['album_seokey'] else ''
         )
+        artwork = results.get('artwork_large') or results.get('artwork_web') or results.get('artwork') or ''
         data['images'] = {'urls': {}}
-        data['images']['urls']['large_artwork'] = results.get('artwork_large', '')
-        data['images']['urls']['medium_artwork'] = results.get('artwork_web', '')
-        data['images']['urls']['small_artwork'] = results.get('artwork', '')
+        data['images']['urls']['large_artwork'] = results.get('artwork_large') or (artwork.replace("size_s.jpg", "size_l.jpg").replace("size_m.jpg", "size_l.jpg") if artwork else '')
+        data['images']['urls']['medium_artwork'] = results.get('artwork_web') or (artwork.replace("size_s.jpg", "size_m.jpg") if artwork else '')
+        data['images']['urls']['small_artwork'] = results.get('artwork') or artwork
         data['stream_urls'] = {'urls': {}}
 
         try:
