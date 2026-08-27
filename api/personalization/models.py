@@ -3,7 +3,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-SEO_KEY_PATTERN = r"^[a-z0-9\-]+$"
+import re
+
+SEO_KEY_PATTERN = r"^[a-zA-Z0-9\-_.%]+$"
 
 
 def _list_from_value(value: Any) -> list[str]:
@@ -69,6 +71,29 @@ class TrackSnapshot(BaseModel):
     album_seokey: str = Field(default="", max_length=200)
     images: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("seokey", mode="before")
+    @classmethod
+    def normalize_seokey(cls, value: Any) -> str:
+        if not value:
+            return "unknown"
+        normalized = str(value).strip()
+        cleaned = re.sub(r"[^a-zA-Z0-9\-_.%]", "-", normalized)
+        return cleaned.strip("-") or "unknown"
+
+    @field_validator("track_id", "title", "language", "album", "album_id", "album_seokey", mode="before")
+    @classmethod
+    def normalize_strings(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def normalize_images(cls, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            return {"urls": {"large_artwork": value.strip()}}
+        return {}
+
     @field_validator("artists", "artist_ids", "genres", mode="before")
     @classmethod
     def normalize_lists(cls, value: Any) -> list[str]:
@@ -80,6 +105,30 @@ class ListeningEvent(TrackSnapshot):
     completed: bool = False
     source: str = Field(default="playback", min_length=1, max_length=50)
 
+    @field_validator("played_seconds", mode="before")
+    @classmethod
+    def normalize_played_seconds(cls, value: Any) -> int:
+        if value is None:
+            return 0
+        try:
+            return max(0, min(86400, int(float(value))))
+        except (ValueError, TypeError):
+            return 0
+
+    @field_validator("completed", mode="before")
+    @classmethod
+    def normalize_completed(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes")
+        return bool(value)
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def normalize_source(cls, value: Any) -> str:
+        if not value:
+            return "playback"
+        return str(value).strip()[:50] or "playback"
+
 
 class ArtistSnapshot(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
@@ -88,6 +137,29 @@ class ArtistSnapshot(BaseModel):
     artist_id: str = Field(default="", max_length=100)
     name: str = Field(min_length=1, max_length=300)
     images: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("seokey", mode="before")
+    @classmethod
+    def normalize_seokey(cls, value: Any) -> str:
+        if not value:
+            return "unknown"
+        normalized = str(value).strip()
+        cleaned = re.sub(r"[^a-zA-Z0-9\-_.%]", "-", normalized)
+        return cleaned.strip("-") or "unknown"
+
+    @field_validator("artist_id", "name", mode="before")
+    @classmethod
+    def normalize_strings(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def normalize_images(cls, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            return {"urls": {"large_artwork": value.strip()}}
+        return {}
 
 
 class AlbumSnapshot(BaseModel):
@@ -98,6 +170,29 @@ class AlbumSnapshot(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     artists: list[str] = Field(default_factory=list, max_length=20)
     images: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("seokey", mode="before")
+    @classmethod
+    def normalize_seokey(cls, value: Any) -> str:
+        if not value:
+            return "unknown"
+        normalized = str(value).strip()
+        cleaned = re.sub(r"[^a-zA-Z0-9\-_.%]", "-", normalized)
+        return cleaned.strip("-") or "unknown"
+
+    @field_validator("album_id", "title", mode="before")
+    @classmethod
+    def normalize_strings(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def normalize_images(cls, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            return {"urls": {"large_artwork": value.strip()}}
+        return {}
 
     @field_validator("artists", mode="before")
     @classmethod

@@ -93,6 +93,24 @@ def test_listening_event_inherits_track_snapshot_normalisation():
     assert event.artists == ["Coldplay"]
 
 
+def test_listening_event_handles_nulls_uppercase_and_float_durations():
+    event = ListeningEvent.model_validate({
+        "seokey": "Kesariya_Song-123",
+        "title": None,
+        "album": None,
+        "played_seconds": 12.8,
+        "images": "https://example.com/cover.jpg",
+        "completed": "true",
+    })
+    assert event.seokey == "Kesariya_Song-123"
+    assert event.title == ""
+    assert event.album == ""
+    assert event.played_seconds == 12
+    assert event.completed is True
+    assert event.images == {"urls": {"large_artwork": "https://example.com/cover.jpg"}}
+
+
+
 # ---------------------------------------------------------------------------
 # Scorer unit tests
 # ---------------------------------------------------------------------------
