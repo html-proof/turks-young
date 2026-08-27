@@ -37,9 +37,26 @@ class Artists:
 
     async def get_top_tracks(self, artist_id: str, limit: int = 10, page: int = 1) -> dict:
         endpoints = self.api_endpoints
-        result = await self._safe_request("POST", endpoints.artist_top_tracks + artist_id)
+        raw_id = str(artist_id).strip()
+        if not raw_id.isdigit():
+            # artist_id is a seokey slug; resolve via get_artist_info
+            info = await self.get_artist_info([raw_id], True, limit, page)
+            if isinstance(info, list) and info and isinstance(info[0], dict):
+                tracks = info[0].get('top_tracks', [])
+                total = info[0].get('total_tracks', len(tracks))
+                return {"tracks": tracks, "total": total}
+            return {"tracks": [], "total": 0}
+
+        result = await self._safe_request("POST", endpoints.artist_top_tracks + raw_id)
         if isinstance(result, dict) and "error" in result:
-            return result
+            # Fallback to get_artist_info if top_tracks endpoint returned error
+            info = await self.get_artist_info([raw_id], True, limit, page)
+            if isinstance(info, list) and info and isinstance(info[0], dict):
+                tracks = info[0].get('top_tracks', [])
+                total = info[0].get('total_tracks', len(tracks))
+                return {"tracks": tracks, "total": total}
+            return {"tracks": [], "total": 0}
+
         track_seokeys = []
         for track in result.get('entities', []):
             seo = track.get('seokey') if isinstance(track, dict) else None

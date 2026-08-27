@@ -505,14 +505,16 @@ class CatalogService:
         if matched_artists and hasattr(self.catalog, "get_top_tracks"):
             async def artist_top_tracks(item):
                 try:
-                    res = await asyncio.wait_for(
-                        self.catalog.get_top_tracks(str(item["id"]), limit=10),
-                        timeout=1.5,
-                    )
-                    if isinstance(res, dict) and "tracks" in res:
-                        return items(res["tracks"], "song")
-                    elif isinstance(res, list):
-                        return items(res, "song")
+                    target_id = str(item.get("artist_id") or item.get("provider_id") or item.get("id") or "")
+                    if target_id:
+                        res = await asyncio.wait_for(
+                            self.catalog.get_top_tracks(target_id, limit=10),
+                            timeout=2.5,
+                        )
+                        if isinstance(res, dict) and "tracks" in res:
+                            return items(res["tracks"], "song")
+                        elif isinstance(res, list):
+                            return items(res, "song")
                 except Exception as exc:
                     logger.warning("search artist top tracks expansion failed artist_id=%s error=%s", item.get("id"), exc)
                 return []
