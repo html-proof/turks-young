@@ -597,30 +597,32 @@ class CatalogService:
         }
 
     async def album_details(self, album_id: str) -> dict[str, Any] | None:
+        normalized_album = None
         try:
             result = _clean(await self.catalog.get_album_info([album_id], True))
-        except Exception:
-            logger.exception("album_details provider_failure album_id=%s", album_id)
-            result = None
-
-        if isinstance(result, list) and result:
-            try:
+            if isinstance(result, list) and result:
                 normalized_album = album(result[0])
                 if (normalized_album.get("id") or normalized_album.get("provider_id")) and normalized_album.get("name"):
-                    logger.info(
-                        "album_details album_id=%s provider_count=%d track_count=%d",
-                        album_id, len(result), len(normalized_album.get("tracks") or []),
-                    )
-                    return normalized_album
-            except Exception:
-                logger.exception("album_details normalization_failure album_id=%s", album_id)
+                    tracks = normalized_album.get("tracks") or normalized_album.get("songs") or []
+                    if tracks:
+                        logger.info(
+                            "album_details album_id=%s provider_count=%d track_count=%d",
+                            album_id, len(result), len(tracks),
+                        )
+                        return normalized_album
+        except Exception:
+            logger.exception("album_details provider_failure album_id=%s", album_id)
 
         # Resilient fallback: Search by album title / query if direct album info returned empty
-        clean_query = album_id.replace("-", " ").replace("_", " ").strip()
-        if clean_query:
+        album_meta = normalized_album or {}
+        album_title = album_meta.get("name") or album_meta.get("title") or album_id.replace("-", " ").replace("_", " ").strip()
+        clean_query = re.sub(r'[^a-zA-Z0-9\s]+', ' ', album_title).strip()
+        query_candidates = [q for q in (album_title, clean_query) if q]
+
+        for query in query_candidates:
             try:
                 # Try search_albums first
-                album_search = _clean(await self.catalog.search_albums(clean_query, 5))
+                album_search = _clean(await self.catalog.search_albums(query, 5))
                 if isinstance(album_search, list) and album_search:
                     for cand in album_search:
                         cand_id = str(cand.get("album_id") or cand.get("id") or cand.get("seokey") or "")
@@ -628,28 +630,29 @@ class CatalogService:
                             info = _clean(await self.catalog.get_album_info([cand_id], True))
                             if isinstance(info, list) and info:
                                 norm = album(info[0])
-                                if norm.get("name") and (norm.get("tracks") or norm.get("songs")):
+                                tracks = norm.get("tracks") or norm.get("songs") or []
+                                if norm.get("name") and tracks:
                                     return norm
             except Exception as exc:
-                logger.warning("album_details search fallback failed album_id=%s error=%s", album_id, exc)
+                logger.warning("album_details search fallback failed query=%s error=%s", query, exc)
 
             try:
                 # Try search_songs to build album and tracklist
-                song_search = _clean(await self.catalog.search_songs(clean_query, 20))
+                song_search = _clean(await self.catalog.search_songs(query, 25))
                 if isinstance(song_search, list) and song_search:
                     song_items = items(song_search, "song")
                     if song_items:
                         first = song_items[0]
                         first_album_raw = first.get("album")
                         first_album_name = (
-                            first_album_raw.get("title") or first_album_raw.get("name") or clean_query.title()
+                            first_album_raw.get("title") or first_album_raw.get("name") or album_title
                             if isinstance(first_album_raw, dict)
-                            else str(first_album_raw or clean_query.title())
+                            else str(first_album_raw or album_title)
                         )
                         first_album_img = (
-                            first_album_raw.get("artworkUrl")
-                            if isinstance(first_album_raw, dict)
-                            else first.get("image_url") or ""
+                            album_meta.get("image_url")
+                            or (first_album_raw.get("artworkUrl") if isinstance(first_album_raw, dict) else None)
+                            or first.get("image_url") or ""
                         )
                         matched_songs = [
                             s for s in song_items
@@ -658,25 +661,32 @@ class CatalogService:
                                 or str(s.get("album") or "").lower() == first_album_name.lower()
                             )
                         ]
-                        resolved_songs = matched_songs if matched_songs else song_items[:12]
+                        resolved_songs = matched_songs if matched_songs else song_items
                         return {
-                            "id": str(first.get("album_id") or album_id),
-                            "provider_id": str(first.get("album_id") or album_id),
+                            "id": str(album_meta.get("id") or first.get("album_id") or album_id),
+                            "provider_id": str(album_meta.get("provider_id") or first.get("album_id") or album_id),
                             "type": "album",
-                            "name": first_album_name,
-                            "title": first_album_name,
+                            "name": album_title or first_album_name,
+                            "title": album_title or first_album_name,
                             "image_url": first_album_img,
                             "imageUrl": first_album_img,
                             "artworkUrl": first_album_img,
-                            "artists": first.get("artists") or [],
-                            "artistNames": [first.get("artist") or ""] if first.get("artist") else [],
+                            "artists": album_meta.get("artists") or first.get("artists") or [],
+                            "artistNames": album_meta.get("artistNames") or ([first.get("artist") or ""] if first.get("artist") else []),
+                            "artistIds": album_meta.get("artistIds") or [],
                             "song_count": len(resolved_songs),
                             "trackCount": len(resolved_songs),
                             "songs": resolved_songs,
                             "tracks": resolved_songs,
+                            "language": album_meta.get("language") or "",
+                            "release_date": album_meta.get("release_date"),
+                            "releaseYear": album_meta.get("releaseYear"),
                         }
             except Exception as exc:
-                logger.warning("album_details song search fallback failed album_id=%s error=%s", album_id, exc)
+                logger.warning("album_details song search fallback failed query=%s error=%s", query, exc)
+
+        if normalized_album:
+            return normalized_album
 
         return None
 
