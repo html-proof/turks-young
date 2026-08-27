@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import random
 import aiohttp
@@ -50,7 +51,17 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
             raise aiohttp.ClientResponseError(
                 response.request_info, response.history, status=response.status
             )
-        result = await response.json()
+        try:
+            result = await response.json(content_type=None)
+        except Exception:
+            text = await response.text()
+            try:
+                result = json.loads(text)
+            except Exception:
+                # If non-JSON or HTML returned from upstream, treat as non-retryable 404
+                raise aiohttp.ClientResponseError(
+                    response.request_info, response.history, status=404, message="Non-JSON response from upstream"
+                )
         if not isinstance(result, dict):
             raise ValueError("Unexpected response format")
         return result
@@ -82,12 +93,13 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
                 logger.warning("upstream retryable status=%s attempt=%d/%d url=%s", exc.status, attempt + 1, config.UPSTREAM_MAX_RETRIES + 1, url)
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as exc:
                 last_exc = exc
+                err_msg = str(exc) or exc.__class__.__name__
                 logger.warning(
                     "upstream attempt=%d/%d url=%s error=%s",
                     attempt + 1,
                     config.UPSTREAM_MAX_RETRIES + 1,
                     url,
-                    exc,
+                    err_msg,
                 )
 
         logger.error("upstream exhausted retries url=%s last_error=%s", url, last_exc)
