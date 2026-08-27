@@ -1,0 +1,77 @@
+name: Keep Render Service Awake
+
+on:
+  schedule:
+    # Runs every 10 minutes to prevent Render free instance from spinning down (sleep threshold is 15 min)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      service_url:
+        description: 'Render Service URL to ping (optional, overrides default)'
+        required: false
+        default: ''
+
+jobs:
+  ping-render:
+    name: Ping Render Web Service
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Send Keep-Alive Ping
+        env:
+          CUSTOM_URL: ${{ github.event.inputs.service_url }}
+          SECRET_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          VAR_URL: ${{ vars.RENDER_SERVICE_URL }}
+          DEFAULT_URL: "https://turks-young.onrender.com"
+        run: |
+          # Determine target URL priority: manual input > secret > variable > default
+          TARGET_URL="${CUSTOM_URL:-${SECRET_URL:-${VAR_URL:-$DEFAULT_URL}}}"
+          
+          # Strip trailing slash if present
+          TARGET_URL="${TARGET_URL%/}"
+          
+          echo "====================================================="
+          echo "  Render Keep-Alive Ping Trigger"
+          echo "  Timestamp : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "  Target    : ${TARGET_URL}"
+          echo "====================================================="
+          
+          # Health check endpoint ping
+          HEALTH_URL="${TARGET_URL}/health"
+          echo "Pinging ${HEALTH_URL}..."
+          
+          # Perform curl with retries and generous timeout in case of cold start
+          HTTP_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}\nTIME_TOTAL:%{time_total}s\n" \
+            --connect-timeout 20 \
+            --max-time 60 \
+            --retry 3 \
+            --retry-delay 5 \
+            -A "GitHub-Actions-Render-KeepAlive/1.0" \
+            "${HEALTH_URL}")
+          
+          STATUS_CODE=$(echo "$HTTP_RESPONSE" | grep "HTTP_STATUS" | cut -d':' -f2)
+          TIME_TAKEN=$(echo "$HTTP_RESPONSE" | grep "TIME_TOTAL" | cut -d':' -f2)
+          BODY=$(echo "$HTTP_RESPONSE" | grep -v "HTTP_STATUS" | grep -v "TIME_TOTAL")
+          
+          echo "Response Body : $BODY"
+          echo "HTTP Status   : $STATUS_CODE"
+          echo "Response Time : $TIME_TAKEN"
+          
+          if [ "$STATUS_CODE" -ge 200 ] && [ "$STATUS_CODE" -lt 400 ]; then
+            echo "✅ Keep-alive ping successful! Render service is awake and active."
+          else
+            echo "⚠️ Received HTTP status $STATUS_CODE. Attempting root endpoint ping..."
+            ROOT_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}\n" \
+              --connect-timeout 20 \
+              --max-time 60 \
+              -A "GitHub-Actions-Render-KeepAlive/1.0" \
+              "${TARGET_URL}/")
+            ROOT_STATUS=$(echo "$ROOT_RESPONSE" | grep "HTTP_STATUS" | cut -d':' -f2)
+            if [ "$ROOT_STATUS" -ge 200 ] && [ "$ROOT_STATUS" -lt 400 ]; then
+              echo "✅ Root ping successful ($ROOT_STATUS). Service is awake."
+            else
+              echo "❌ Error: Service returned HTTP status $ROOT_STATUS."
+              exit 1
+            fi
+          fi

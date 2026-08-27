@@ -92,3 +92,13 @@ Home feed pages return `sections`, `next_cursor`, `has_more`, and `content_type`
 Supported types are `all`, `song`, `album`, `artist`, and `playlist`. Cached
 content is served while stale data is revalidated, and concurrent requests for
 the same page are coalesced per API worker.
+
+## Keep Render Web Service Awake
+
+Render free tier instances go to sleep after 15 minutes of inactivity. To prevent cold starts and keep the API active 24/7, a GitHub Actions cron trigger is configured at `.github/workflows/render-keep-alive.yml`.
+
+- **Frequency**: Runs automatically every 10 minutes (`*/10 * * * *`).
+- **Endpoint**: Pings `GET /health` (falling back to `GET /`).
+- **Manual Trigger**: Can also be dispatched manually via the **Actions** tab in GitHub.
+- **Custom URL (Optional)**: Set the repository Secret or Variable `RENDER_SERVICE_URL` in GitHub Repository Settings -> Secrets and variables -> Actions if your service URL changes.
+
