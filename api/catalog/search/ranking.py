@@ -85,13 +85,17 @@ def score(query: str, item: dict[str, Any], kind: str) -> float:
         if not normalized:
             continue
         if normalized == q:
-            best = max(best, weight)
+            best = max(best, weight * 1.5)
         elif normalized.startswith(q):
-            best = max(best, weight * 0.85)
-        elif all(token in _tokens(normalized) for token in _tokens(q)):
+            best = max(best, weight * 1.2)
+        elif any(token.startswith(q) for token in _tokens(normalized)):
+            best = max(best, weight * 1.0)
+        elif q in normalized:
             best = max(best, weight * 0.75)
+        elif all(token in _tokens(normalized) for token in _tokens(q)):
+            best = max(best, weight * 0.70)
         else:
-            best = max(best, weight * 0.70 * _similarity(q, normalized))
+            best = max(best, weight * 0.35 * _similarity(q, normalized))
 
     combined_tokens = set(_tokens(f"{title} {artists} {album}"))
     if len(query_tokens) > 1:
@@ -140,7 +144,13 @@ def _strong_match(query: str, item: dict[str, Any], kind: str) -> bool:
     for value in fields:
         normalized = normalize_query(value)
         tokens = _tokens(normalized)
-        if normalized == q or normalized.startswith(q) or q in tokens:
+        if (
+            normalized == q
+            or normalized.startswith(q)
+            or any(token.startswith(q) for token in tokens)
+            or q in tokens
+            or q in normalized
+        ):
             return True
         # Multi-word searches may match across a title and its artist credit,
         # but every query word must still be present as a complete/prefix word.
