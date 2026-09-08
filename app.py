@@ -6,6 +6,7 @@ import uuid
 import time
 from typing import Optional
 
+import aiohttp
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -157,8 +158,12 @@ async def startup_event():
 
     if config.LYRICS_PROVIDER != "lrclib":
         raise RuntimeError(f"Unsupported LYRICS_PROVIDER: {config.LYRICS_PROVIDER}")
+    lyrics_session = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=config.LYRICS_TIMEOUT),
+    )
+    app.state.lyrics_session = lyrics_session
     lyrics_provider = LRCLibProvider(
-        gaanapy.aiohttp,
+        lyrics_session,
         user_agent=config.LYRICS_USER_AGENT,
         timeout=config.LYRICS_TIMEOUT,
     )
@@ -186,6 +191,7 @@ async def startup_event():
         repository=PostgresLyricsRepository(app.state.db_pool),
         success_ttl=config.TTL_LYRICS,
         not_found_ttl=config.TTL_LYRICS_NOT_FOUND,
+        cache=cache,
     )
 
 
@@ -194,6 +200,9 @@ async def shutdown_event():
     gaanapy: GaanaPy | None = app.state.gaanapy
     if gaanapy and hasattr(gaanapy, "aiohttp"):
         await gaanapy.aiohttp.close()
+    lyrics_session: aiohttp.ClientSession | None = getattr(app.state, "lyrics_session", None)
+    if lyrics_session and not lyrics_session.closed:
+        await lyrics_session.close()
     cache: RedisCache | None = app.state.cache
     if cache:
         await cache.close()

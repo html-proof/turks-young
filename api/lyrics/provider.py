@@ -157,10 +157,30 @@ def _candidate_score(candidate: dict[str, Any], track: dict[str, Any]) -> int:
 class LRCLibProvider(LyricsProvider):
     BASE_URL = "https://lrclib.net/api"
 
-    def __init__(self, session: aiohttp.ClientSession, user_agent: str, timeout: float = 10.0):
-        self.session = session
-        self.headers = {"User-Agent": user_agent}
+    def __init__(self, session: aiohttp.ClientSession | None = None, user_agent: str = "MusicHub/1.0", timeout: float = 10.0):
+        # Cloudflare on lrclib.net rejects requests containing X-Forwarded-For or CF-IPCountry headers with HTTP 503.
+        # If a session with these headers is passed, create a clean dedicated session instead.
+        self._owned_session = False
+        if session is not None and getattr(session, "_default_headers", None):
+            has_blocked_headers = any(
+                k.lower() in ("x-forwarded-for", "cf-ipcountry")
+                for k in session._default_headers.keys()
+            )
+            if has_blocked_headers:
+                session = None
+
+        if session is None:
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout))
+            self._owned_session = True
+        else:
+            self.session = session
+
+        self.headers = {"User-Agent": user_agent, "Accept": "application/json"}
         self.timeout = aiohttp.ClientTimeout(total=timeout)
+
+    async def close(self):
+        if self._owned_session and self.session and not self.session.closed:
+            await self.session.close()
 
     async def _request(self, path: str, params: dict[str, Any]) -> Any:
         try:

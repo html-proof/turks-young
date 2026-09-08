@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 
@@ -5,7 +7,7 @@ from api.core import config
 from api.lyrics.models import LyricsResponse
 from api.lyrics.provider import LyricsProviderError, LyricsRateLimited
 
-
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["lyrics"])
 SEO_KEY = r"^[a-zA-Z0-9\-_./%\[\]()+@]+$"
 
@@ -57,7 +59,17 @@ async def _lyrics_for_track(
             content={"detail": "Lyrics provider rate limit reached", "status": "rate_limited"},
         )
     except LyricsProviderError as exc:
-        raise HTTPException(status_code=503, detail="Lyrics service is temporarily unavailable") from exc
+        logger.warning("Lyrics provider error for %s: %s", track_id, exc)
+        return {
+            "trackId": track_id,
+            "provider": None,
+            "providerId": None,
+            "status": "not_found",
+            "synced": False,
+            "instrumental": False,
+            "plainLyrics": None,
+            "lines": [],
+        }
 
 
 @router.get(
