@@ -20,6 +20,7 @@ from api.personalization.models import (
     TrackSnapshot,
     UserPlaylistCreate,
     UserPlaylistUpdate,
+    SEO_KEY_PATTERN,
 )
 from api.personalization.repository import PostgresUserRepository as FirebaseUserRepository
 from api.personalization.service import PersonalizedMusicService
@@ -110,7 +111,7 @@ async def save_favorite(
 
 @router.delete("/favorites/{seokey}", summary="Remove a favorite track.")
 async def remove_favorite(
-    seokey: str = Path(..., min_length=1, max_length=200, pattern=r"^[a-z0-9\-]+$"),
+    seokey: str = Path(..., min_length=1, max_length=200, pattern=SEO_KEY_PATTERN),
     user: AuthenticatedUser = Depends(get_current_user),
     repository: FirebaseUserRepository = Depends(get_user_repository),
 ) -> dict[str, bool]:
@@ -297,7 +298,7 @@ async def add_user_playlist_track(
 @router.delete("/playlists/{playlist_id}/tracks/{seokey}", summary="Remove a playlist track.")
 async def remove_user_playlist_track(
     playlist_id: UUID,
-    seokey: str = Path(..., min_length=1, max_length=200, pattern=r"^[a-z0-9\-]+$"),
+    seokey: str = Path(..., min_length=1, max_length=200, pattern=SEO_KEY_PATTERN),
     user: AuthenticatedUser = Depends(get_current_user),
     repository: FirebaseUserRepository = Depends(get_user_repository),
 ) -> dict[str, Any]:
@@ -326,7 +327,7 @@ async def follow_artist(
 
 @router.delete("/artists/{seokey}", summary="Unfollow an artist.")
 async def unfollow_artist(
-    seokey: str = Path(..., min_length=1, max_length=200, pattern=r"^[a-z0-9\-]+$"),
+    seokey: str = Path(..., min_length=1, max_length=200, pattern=SEO_KEY_PATTERN),
     user: AuthenticatedUser = Depends(get_current_user),
     repository: FirebaseUserRepository = Depends(get_user_repository),
 ) -> dict[str, bool]:
@@ -354,7 +355,7 @@ async def save_album(
 
 @router.delete("/albums/{seokey}", summary="Remove a saved album.")
 async def remove_saved_album(
-    seokey: str = Path(..., min_length=1, max_length=200, pattern=r"^[a-z0-9\-]+$"),
+    seokey: str = Path(..., min_length=1, max_length=200, pattern=SEO_KEY_PATTERN),
     user: AuthenticatedUser = Depends(get_current_user),
     repository: FirebaseUserRepository = Depends(get_user_repository),
 ) -> dict[str, bool]:

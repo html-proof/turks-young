@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 import re
 
-SEO_KEY_PATTERN = r"^[a-zA-Z0-9\-_.%]+$"
+SEO_KEY_PATTERN = r"^[a-zA-Z0-9\-_./%\[\]()+@]+$"
 
 
 def _list_from_value(value: Any) -> list[str]:
@@ -77,7 +77,7 @@ class TrackSnapshot(BaseModel):
         if not value:
             return "unknown"
         normalized = str(value).strip()
-        cleaned = re.sub(r"[^a-zA-Z0-9\-_.%]", "-", normalized)
+        cleaned = re.sub(r"[^a-zA-Z0-9\-_./%\[\]()+@]", "-", normalized)
         return cleaned.strip("-") or "unknown"
 
     @field_validator("track_id", "title", "language", "album", "album_id", "album_seokey", mode="before")

@@ -208,10 +208,10 @@ MAX_SEOKEY_LENGTH = 200
 MAX_ARTIST_ID_LENGTH = 20
 MAX_LANGUAGE_LENGTH = 50
 
-SEO_KEY_BASE_PATTERN = r"^[a-zA-Z0-9\-_.%]+$"
+SEO_KEY_BASE_PATTERN = r"^[a-zA-Z0-9\-_./%\[\]()+@]+$"
 ARTIST_ID_PATTERN = r"^[0-9]+$"
 LANGUAGE_PATTERN = r"^[a-zA-Z]+(?:\s[a-zA-Z]+)*$"
-SEARCH_QUERY_PATTERN = r"^[a-zA-Z0-9\s\-'.&]+$"
+SEARCH_QUERY_PATTERN = r"^[^<>\r\n]+$"
 
 
 def validate_seokey(

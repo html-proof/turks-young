@@ -8,7 +8,8 @@ const TTL_RULES = [
   [/^\/newreleases\b/, 900],
   [/^\/(songs|artists|albums|playlists)\/search\//, 900],
   [/^\/playlists\/info\//, 3600],
-  [/^\/(songs|albums|artists)\/info\//, 21600],
+  [/^\/songs\/info\//, 1800],
+  [/^\/(albums|artists)\/info\//, 21600],
   [/^\/(artists|albums)\/(similar|tracks)\//, 21600],
 ];
 
@@ -17,7 +18,17 @@ const HOP_BY_HOP = [
   "te", "trailer", "transfer-encoding", "upgrade", "host",
 ];
 
-function getTtl(pathname) {
+function getTtl(url) {
+  if (typeof url === "object" && url !== null && url.searchParams) {
+    if (url.searchParams.get("refresh") === "true" || url.searchParams.get("force_fresh") === "true") {
+      return 0;
+    }
+    return getTtlFromPath(url.pathname);
+  }
+  return getTtlFromPath(String(url));
+}
+
+function getTtlFromPath(pathname) {
   for (const [pattern, ttl] of TTL_RULES) {
     if (pattern.test(pathname)) return ttl;
   }
@@ -72,7 +83,7 @@ export default {
       );
     }
 
-    const ttl = getTtl(url.pathname);
+    const ttl = getTtl(url);
     const upstreamUrl = `${backend}${url.pathname}${url.search}`;
     const headers = new Headers(request.headers);
     for (const name of HOP_BY_HOP) headers.delete(name);

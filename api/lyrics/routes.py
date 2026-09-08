@@ -7,7 +7,7 @@ from api.lyrics.provider import LyricsProviderError, LyricsRateLimited
 
 
 router = APIRouter(tags=["lyrics"])
-SEO_KEY = r"^[a-zA-Z0-9\-_.%]+$"
+SEO_KEY = r"^[a-zA-Z0-9\-_./%\[\]()+@]+$"
 
 
 async def _lyrics_for_track(
