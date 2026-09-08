@@ -34,11 +34,19 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
         self.api_endpoints = endpoints
         self.functions = Functions()
         self.errors = Errors()
+        def _is_gaana_failure(exc: Exception) -> bool:
+            if isinstance(exc, aiohttp.ClientResponseError):
+                return exc.status in {408, 429, 500, 502, 503, 504}
+            if isinstance(exc, (aiohttp.ClientConnectionError, aiohttp.ServerDisconnectedError, aiohttp.ClientOSError, asyncio.TimeoutError)):
+                return True
+            return False
+
         self._circuit_breaker = CircuitBreaker(
             name="gaana",
             failure_threshold=config.CB_FAILURE_THRESHOLD,
             recovery_timeout=config.CB_RECOVERY_TIMEOUT,
             window=config.CB_WINDOW,
+            is_failure=_is_gaana_failure,
         )
 
     async def _do_request(self, method: str, url: str, **kwargs) -> dict:
@@ -48,6 +56,9 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
         else:
             response = await self.aiohttp.post(url, **kwargs)
         if response.status != 200:
+            if response.status == 404:
+                # Upstream Gaana returns HTTP 404 when query or entity yields no results
+                return await self.errors.no_results()
             raise aiohttp.ClientResponseError(
                 response.request_info, response.history, status=response.status
             )
@@ -58,12 +69,15 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
             try:
                 result = json.loads(text)
             except Exception:
-                # If non-JSON or HTML returned from upstream, treat as non-retryable 404
-                raise aiohttp.ClientResponseError(
-                    response.request_info, response.history, status=404, message="Non-JSON response from upstream"
-                )
+                # Non-JSON or HTML returned from upstream indicates clean empty response
+                return await self.errors.no_results()
+        if result == "" or result is None or (isinstance(result, str) and not result.strip()):
+            # Gaana returns 200 OK with "" when 0 search results are found
+            return await self.errors.no_results()
         if not isinstance(result, dict):
-            raise ValueError("Unexpected response format")
+            if isinstance(result, list):
+                return {"data": result}
+            return await self.errors.no_results()
         return result
 
     async def _safe_request(self, method: str, url: str, **kwargs) -> dict:
@@ -91,7 +105,7 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
                     return await self.errors.no_results()
                 last_exc = exc
                 logger.warning("upstream retryable status=%s attempt=%d/%d url=%s", exc.status, attempt + 1, config.UPSTREAM_MAX_RETRIES + 1, url)
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 last_exc = exc
                 err_msg = str(exc) or exc.__class__.__name__
                 logger.warning(
@@ -101,6 +115,9 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
                     url,
                     err_msg,
                 )
+            except (ValueError, TypeError) as exc:
+                logger.info("upstream format warning url=%s error=%s", url, exc)
+                return await self.errors.no_results()
 
         logger.error("upstream exhausted retries url=%s last_error=%s", url, last_exc)
         return await self.errors.no_results()

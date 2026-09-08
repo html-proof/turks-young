@@ -11,7 +11,14 @@ class Albums:
         entries = search_entries(result) if not (isinstance(result, dict) and "error" in result) else []
 
         if not entries:
-            for expansion in [f"{clean_q} movie", f"{clean_q} songs", f"{clean_q} soundtrack", f"{clean_q} album"]:
+            clean_lower = clean_q.lower()
+            tokens = set(clean_lower.split())
+            expansions = [
+                f"{clean_q} {suffix}"
+                for suffix in ("movie", "soundtrack", "album", "songs")
+                if suffix not in tokens and not clean_lower.endswith(suffix)
+            ]
+            for expansion in expansions[:2]:
                 exp_result = await self._safe_request("POST", endpoints.search_albums_url + encoded_query(expansion))
                 if not (isinstance(exp_result, dict) and "error" in exp_result):
                     exp_entries = search_entries(exp_result)

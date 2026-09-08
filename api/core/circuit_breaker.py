@@ -11,6 +11,8 @@ import time
 import logging
 from enum import Enum
 
+from typing import Callable, Optional
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,11 +29,13 @@ class CircuitBreaker:
         failure_threshold: int,
         recovery_timeout: float,
         window: float,
+        is_failure: Optional[Callable[[Exception], bool]] = None,
     ):
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.window = window
+        self.is_failure = is_failure
 
         self._state = CBState.CLOSED
         self._failure_times: list[float] = []
@@ -46,7 +50,7 @@ class CircuitBreaker:
         cutoff = time.monotonic() - self.window
         self._failure_times = [t for t in self._failure_times if t >= cutoff]
 
-    async def call(self, coro):
+    async def call(self, coro, is_failure: Optional[Callable[[Exception], bool]] = None):
         """Wrap an awaitable. Raises CircuitOpenError when the circuit is open."""
         async with self._lock:
             now = time.monotonic()
@@ -64,8 +68,10 @@ class CircuitBreaker:
             result = await coro
             await self._on_success()
             return result
-        except Exception:
-            await self._on_failure()
+        except Exception as exc:
+            check_failure = is_failure if is_failure is not None else self.is_failure
+            if check_failure is None or check_failure(exc):
+                await self._on_failure()
             raise
 
     async def _on_success(self) -> None:

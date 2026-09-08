@@ -528,7 +528,8 @@ class CatalogService:
                     extra_songs.extend(tracks)
 
         # Deep scan 3: Multi-word query fallback when direct song search is sparse
-        query_words = [w for w in normalized_query.split() if len(w) > 2]
+        stopwords = {"movie", "film", "songs", "song", "track", "audio", "album", "soundtrack", "the", "and"}
+        query_words = [w for w in normalized_query.split() if len(w) > 2 and w.lower() not in stopwords]
         if len(query_words) > 1 and len(grouped.get("songs", [])) < 2:
             async def sub_search(w):
                 try:
