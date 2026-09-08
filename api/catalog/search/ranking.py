@@ -8,6 +8,31 @@ from typing import Any
 _PUNCTUATION = re.compile(r"[^\w\s]", re.UNICODE)
 _SEPARATORS = re.compile(r"\b(?:feat\.?|ft\.?|featuring|with)\b|\s+-\s+", re.I)
 
+KNOWN_LANGUAGES = {
+    "malayalam", "tamil", "hindi", "telugu", "kannada", "punjabi",
+    "english", "bengali", "marathi", "bhojpuri", "gujarati", "urdu",
+    "odia", "assamese",
+}
+
+_UNOFFICIAL_NOISE = re.compile(
+    r"\b(?:cover|karaoke|instrumental|reverb|lo-?fi|slowed|ringtone|status|dj remix|tribute|short|dialogue promo|whatsapp status)\b",
+    re.I,
+)
+
+_OST_KEYWORDS = re.compile(
+    r"\b(?:original motion picture soundtrack|original soundtrack|ost|soundtrack)\b",
+    re.I,
+)
+
+_KNOWN_OFFICIAL_LABELS = {
+    "sony music", "t-series", "saregama", "universal music", "warner music",
+    "zee music", "lahari music", "think music", "muzik247", "satyam audios",
+    "manorama music", "v cinemas", "star music", "aditya music", "rafa international",
+    "speed records", "yrf music", "tips", "speed audio", "east coast",
+    "millennium audios", "dvocean", "audio video media", "v cinemas international",
+    "speed audio & video", "surya audio", "mango music", "madhu audio",
+}
+
 
 def normalize_query(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "")
@@ -43,6 +68,59 @@ def _text(item: dict[str, Any], kind: str) -> tuple[str, str, str]:
     return title, artist_text, album_text
 
 
+def _levenshtein(s1: str, s2: str) -> int:
+    if len(s1) < len(s2):
+        return _levenshtein(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    prev = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        curr = [i + 1]
+        for j, c2 in enumerate(s2):
+            ins = prev[j + 1] + 1
+            dele = curr[j] + 1
+            subs = prev[j] + (c1 != c2)
+            curr.append(min(ins, dele, subs))
+        prev = curr
+    return prev[-1]
+
+
+def _phonetic_normalize(text: str) -> str:
+    t = normalize_query(text)
+    replacements = [
+        ("zh", "l"),
+        ("th", "t"),
+        ("ee", "i"),
+        ("oo", "u"),
+        ("v", "w"),
+        ("dh", "d"),
+        ("sh", "s"),
+        ("aa", "a"),
+    ]
+    for old, new in replacements:
+        t = t.replace(old, new)
+    return t
+
+
+def _is_phonetic_match(query: str, target: str) -> bool:
+    pq = _phonetic_normalize(query)
+    pt = _phonetic_normalize(target)
+    if not pq or not pt:
+        return False
+    return pq == pt or pt.startswith(pq) or any(tok.startswith(pq) for tok in pt.split())
+
+
+def _is_typo_match(query: str, target: str) -> bool:
+    q = normalize_query(query)
+    t = normalize_query(target)
+    if len(q) < 3 or not t:
+        return False
+    max_dist = 1 if len(q) <= 5 else 2
+    if _levenshtein(q, t) <= max_dist:
+        return True
+    return any(_levenshtein(q, tok) <= max_dist for tok in t.split() if len(tok) >= 3)
+
+
 def _similarity(query: str, value: str) -> float:
     if not value:
         return 0.0
@@ -52,92 +130,145 @@ def _similarity(query: str, value: str) -> float:
     return max(whole, token / len(q_tokens) if q_tokens else 0.0)
 
 
-_UNOFFICIAL_NOISE = re.compile(
-    r"\b(?:cover|karaoke|instrumental|reverb|lo-?fi|slowed|ringtone|status|dj remix|tribute|short|dialogue promo|whatsapp status)\b",
-    re.I,
-)
-
-_OST_KEYWORDS = re.compile(
-    r"\b(?:original motion picture soundtrack|original soundtrack|ost|soundtrack)\b",
-    re.I,
-)
-
-_KNOWN_OFFICIAL_LABELS = {
-    "sony music", "t-series", "saregama", "universal music", "warner music",
-    "zee music", "lahari music", "think music", "muzik247", "satyam audios",
-    "manorama music", "v cinemas", "star music", "aditya music", "rafa international",
-    "speed records", "yrf music", "tips", "speed audio", "east coast",
-    "millennium audios", "dvocean", "audio video media", "v cinemas international",
-    "speed audio & video", "surya audio", "mango music", "madhu audio",
-}
+def _semantic_fingerprint(item: dict[str, Any], kind: str) -> str:
+    title, artists, album = _text(item, kind)
+    norm_t = normalize_query(title)
+    primary_art = normalize_query(artists.split(",")[0] if artists else "")
+    norm_al = normalize_query(album)
+    dur = item.get("duration") or item.get("duration_seconds") or 0
+    try:
+        dur_bucket = int(float(dur)) // 8
+    except (TypeError, ValueError):
+        dur_bucket = 0
+    return f"{norm_t}::{primary_art}::{norm_al}::{dur_bucket}"
 
 
 def score(query: str, item: dict[str, Any], kind: str) -> float:
     q = normalize_query(query)
-    query_tokens = set(_tokens(q))
-    title, artists, album = _text(item, kind)
-    fields = [(title, 100.0), (artists, 75.0), (album, 65.0)]
-    if kind == "artist":
-        fields = [(title, 110.0)]
-    best = 0.0
-    for value, weight in fields:
-        normalized = normalize_query(value)
-        if not normalized:
-            continue
-        if normalized == q:
-            best = max(best, weight * 1.5)
-        elif normalized.startswith(q):
-            best = max(best, weight * 1.2)
-        elif any(token.startswith(q) for token in _tokens(normalized)):
-            best = max(best, weight * 1.0)
-        elif q in normalized:
-            best = max(best, weight * 0.75)
-        elif all(token in _tokens(normalized) for token in _tokens(q)):
-            best = max(best, weight * 0.70)
+    if not q:
+        return 0.0
+
+    q_tokens = _tokens(q)
+    detected_lang = None
+    core_tokens = []
+    for token in q_tokens:
+        if token in KNOWN_LANGUAGES and not detected_lang:
+            detected_lang = token
         else:
-            best = max(best, weight * 0.35 * _similarity(q, normalized))
+            core_tokens.append(token)
 
-    combined_tokens = set(_tokens(f"{title} {artists} {album}"))
-    if len(query_tokens) > 1:
-        matched_tokens = query_tokens & combined_tokens
-        if len(matched_tokens) == len(query_tokens):
-            best = max(best, 95.0)
-        elif len(matched_tokens) > 1:
-            best += (len(matched_tokens) / len(query_tokens)) * 30.0
-        if query_tokens & set(_tokens(title)) and query_tokens & set(_tokens(artists)):
-            best += 25.0
+    clean_q = " ".join(core_tokens) if core_tokens else q
 
-    # 1. Soundtrack / Album match boost (e.g. searching "classmates", "pattalam", "operation java", "jilla")
+    title, artists, album = _text(item, kind)
+    norm_title = normalize_query(title)
+    norm_artists = normalize_query(artists)
     norm_album = normalize_query(album)
     clean_album = _OST_KEYWORDS.sub("", norm_album).strip()
-    if clean_album and (clean_album == q or clean_album.startswith(q)):
-        best = max(best, 95.0)
-        if _OST_KEYWORDS.search(norm_album) or _OST_KEYWORDS.search(title):
-            best += 10.0
 
-    # 2. Official Record Label Boost
+    item_lang = str(item.get("language") or item.get("lang") or "").lower().strip()
+
+    score_val = 0.0
+
+    if kind == "artist":
+        if norm_title == clean_q:
+            score_val = 1000.0
+        elif norm_title.startswith(clean_q):
+            score_val = 850.0
+        elif any(t.startswith(clean_q) for t in _tokens(norm_title)):
+            score_val = 750.0
+        elif clean_q in norm_title:
+            score_val = 600.0
+        elif _is_phonetic_match(clean_q, norm_title):
+            score_val = 550.0
+        elif _is_typo_match(clean_q, norm_title):
+            score_val = 500.0
+        else:
+            score_val = 100.0 * _similarity(clean_q, norm_title)
+    elif kind == "album":
+        if norm_title == clean_q or (clean_album and clean_album == clean_q):
+            score_val = 950.0
+        elif norm_title.startswith(clean_q) or (clean_album and clean_album.startswith(clean_q)):
+            score_val = 850.0
+        elif any(t.startswith(clean_q) for t in _tokens(norm_title)):
+            score_val = 750.0
+        elif clean_q in norm_title:
+            score_val = 600.0
+        elif norm_artists == clean_q:
+            score_val = 550.0
+        elif clean_q in norm_artists:
+            score_val = 400.0
+        elif _is_phonetic_match(clean_q, norm_title):
+            score_val = 450.0
+        elif _is_typo_match(clean_q, norm_title):
+            score_val = 400.0
+        else:
+            score_val = 100.0 * _similarity(clean_q, norm_title)
+    else:  # song
+        if norm_title == clean_q:
+            score_val = 1000.0
+        elif clean_album and clean_album == clean_q:
+            score_val = 950.0
+        elif norm_title.startswith(clean_q):
+            score_val = 850.0
+        elif any(t.startswith(clean_q) for t in _tokens(norm_title)):
+            score_val = 750.0
+        elif norm_artists == clean_q:
+            score_val = 700.0
+        elif clean_q in norm_title:
+            score_val = 600.0
+        elif clean_album and clean_q in clean_album:
+            score_val = 500.0
+        elif norm_artists.startswith(clean_q):
+            score_val = 450.0
+        elif clean_q in norm_artists:
+            score_val = 350.0
+        elif _is_phonetic_match(clean_q, norm_title):
+            score_val = 380.0
+        elif _is_typo_match(clean_q, norm_title):
+            score_val = 320.0
+        else:
+            if len(core_tokens) > 1:
+                combined = set(_tokens(f"{norm_title} {norm_artists} {norm_album}"))
+                matched = set(core_tokens) & combined
+                if len(matched) == len(core_tokens):
+                    score_val = 580.0
+                elif len(matched) > 0:
+                    score_val = 200.0 + (len(matched) / len(core_tokens)) * 250.0
+            if score_val == 0.0:
+                score_val = 100.0 * _similarity(clean_q, norm_title)
+
+    # Language intent bonus (+250)
+    if detected_lang and item_lang:
+        if detected_lang in item_lang or item_lang in detected_lang:
+            score_val += 250.0
+        else:
+            score_val -= 100.0
+
+    # Official Record Label Boost (+20)
     label = str(item.get("label") or "").lower().strip()
     if any(known in label for known in _KNOWN_OFFICIAL_LABELS):
-        best += 12.0
+        score_val += 20.0
 
-    # 3. Unofficial / Noise penalty (karaoke, bedroom covers, slowed reverb, ringtones, status)
-    if not _UNOFFICIAL_NOISE.search(q):
-        if _UNOFFICIAL_NOISE.search(title) or _UNOFFICIAL_NOISE.search(norm_album):
-            best -= 45.0
+    # Unofficial / Noise penalty (-400)
+    if not _UNOFFICIAL_NOISE.search(clean_q):
+        if _UNOFFICIAL_NOISE.search(norm_title) or _UNOFFICIAL_NOISE.search(norm_album):
+            score_val -= 400.0
 
+    # Popularity is strictly subordinate: max +30
     popularity = item.get("popularity_score") or item.get("popularity") or 0
     try:
-        best += min(float(popularity), 1.0) * 10.0
+        score_val += min(float(popularity), 1.0) * 30.0
     except (TypeError, ValueError):
         pass
-    return max(best, 0.0)
+
+    return max(score_val, 0.0)
 
 
 def _strong_match(query: str, item: dict[str, Any], kind: str) -> bool:
-    """Return true only for a real word/prefix match, not a fuzzy neighbour."""
+    """Return true only for a real word/prefix match, not a distant fuzzy match."""
     q = normalize_query(query)
-    query_tokens = _tokens(q)
-    if not query_tokens:
+    q_tokens = _tokens(q)
+    if not q_tokens:
         return False
     title, artists, album = _text(item, kind)
     fields = [title] if kind == "artist" else [title, artists, album]
@@ -150,46 +281,64 @@ def _strong_match(query: str, item: dict[str, Any], kind: str) -> bool:
             or any(token.startswith(q) for token in tokens)
             or q in tokens
             or q in normalized
+            or _is_phonetic_match(q, normalized)
+            or _is_typo_match(q, normalized)
         ):
             return True
-        # Multi-word searches may match across a title and its artist credit,
-        # but every query word must still be present as a complete/prefix word.
-        if len(query_tokens) > 1 and all(
+        if len(q_tokens) > 1 and all(
             any(token == wanted or token.startswith(wanted) for token in tokens)
-            for wanted in query_tokens
+            for wanted in q_tokens
         ):
             return True
-    # Cross-field token matching (e.g. searching "Believer Imagine Dragons" or "Tum Hi Ho Arijit")
-    if len(query_tokens) > 1:
+    if len(q_tokens) > 1:
         combined_tokens = _tokens(f"{title} {artists} {album}")
         if all(
             any(token == wanted or token.startswith(wanted) for token in combined_tokens)
-            for wanted in query_tokens
+            for wanted in q_tokens
         ):
             return True
     return False
 
 
 def rank(query: str, values: list[dict[str, Any]], kind: str, limit: int) -> list[dict[str, Any]]:
-    ranked: list[tuple[float, int, dict[str, Any]]] = []
-    seen: set[str] = set()
+    seen_ids: set[str] = set()
+    fingerprint_map: dict[str, tuple[float, int, dict[str, Any]]] = {}
+
     for index, item in enumerate(values):
         item_id = str(item.get("id") or "")
-        if not item_id or item_id in seen:
+        if item_id and item_id in seen_ids:
             continue
-        seen.add(item_id)
+        if item_id:
+            seen_ids.add(item_id)
+
         ranked_item = dict(item)
-        ranked_item["_search_score"] = score(query, ranked_item, kind)
-        ranked.append((ranked_item["_search_score"], index, ranked_item))
-    # Provider search is intentionally broad. If it gives us any genuine
-    # title/artist/album word matches, do not let typo-neighbours such as
-    # "pattanam" outrank or clutter results for "pattalam".
+        item_score = score(query, ranked_item, kind)
+        ranked_item["_search_score"] = item_score
+
+        fp = _semantic_fingerprint(ranked_item, kind)
+        if fp in fingerprint_map:
+            prev_score, prev_idx, prev_item = fingerprint_map[fp]
+            if item_score > prev_score:
+                fingerprint_map[fp] = (item_score, index, ranked_item)
+        else:
+            fingerprint_map[fp] = (item_score, index, ranked_item)
+
+    ranked = list(fingerprint_map.values())
     strong = [item for item in ranked if _strong_match(query, item[2], kind)]
     if strong:
         ranked = strong
-    ranked.sort(key=lambda value: (-value[0], value[1]))
-    return [{key: value for key, value in item.items() if key != "_search_score"} for _, _, item in ranked[:limit]]
+
+    q_norm = normalize_query(query)
+    ranked.sort(
+        key=lambda v: (
+            -v[0],
+            not normalize_query(str(v[2].get("title") or v[2].get("name") or "")).startswith(q_norm),
+            len(str(v[2].get("title") or v[2].get("name") or "")),
+            v[1],
+        )
+    )
+    return [{k: val for k, val in item.items() if k != "_search_score"} for _, _, item in ranked[:limit]]
 
 
 def confidence(query: str, item: dict[str, Any], kind: str) -> float:
-    return min(score(query, item, kind) / 125.0, 1.0)
+    return min(score(query, item, kind) / 1000.0, 1.0)
