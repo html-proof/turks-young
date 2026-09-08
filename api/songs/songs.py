@@ -9,7 +9,8 @@ class Songs:
         result = await self._safe_request("POST", endpoints.search_songs_url + encoded_query(clean_q))
         entries = search_entries(result) if not (isinstance(result, dict) and "error" in result) else []
 
-        if not entries:
+        from api.core.circuit_breaker import CBState
+        if not entries and self._circuit_breaker.state == CBState.CLOSED:
             clean_lower = clean_q.lower()
             tokens = set(clean_lower.split())
             expansions = [

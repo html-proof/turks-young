@@ -77,9 +77,13 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Request-ID middleware
 # ---------------------------------------------------------------------------
+_SAFE_RID = re.compile(r"[^a-zA-Z0-9\-_]")
+
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    rid = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    raw = request.headers.get("X-Request-ID") or ""
+    # Sanitize: strip non-alphanumeric/dash/underscore chars and cap length
+    rid = _SAFE_RID.sub("", raw)[:64] or str(uuid.uuid4())
     request.state.request_id = rid
     response = await call_next(request)
     response.headers["X-Request-ID"] = rid
@@ -119,7 +123,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
     return JSONResponse(
         status_code=502,
-        content={"error": f"Upstream data source error: {type(exc).__name__}"},
+        content={"error": "An unexpected error occurred. Please try again."},
     )
 
 
@@ -303,7 +307,7 @@ async def songs_search(
     key = f"songs:search:{query}:{limit}"
     result = await _cached(cache, key, config.TTL_SEARCH, lambda: gaana.search_songs(query, limit))
     if isinstance(result, dict) and "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
+        return []
     return result
 
 
@@ -341,7 +345,7 @@ async def albums_search(
     key = f"albums:search:{query}:{limit}"
     result = await _cached(cache, key, config.TTL_SEARCH, lambda: gaana.search_albums(query, limit))
     if isinstance(result, dict) and "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
+        return []
     return result
 
 
@@ -387,7 +391,7 @@ async def artists_search(
     key = f"artists:search:{query}:{limit}"
     result = await _cached(cache, key, config.TTL_SEARCH, lambda: gaana.search_artists(query, limit))
     if isinstance(result, dict) and "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
+        return []
     return result
 
 

@@ -339,10 +339,12 @@ class PostgresUserRepository:
             )
         return self._playlist_record(row)
 
+    _PLAYLIST_COLUMNS = frozenset({"name", "description", "is_public"})
+
     async def update_playlist(
         self, uid: str, playlist_id: uuid.UUID, data: UserPlaylistUpdate,
     ) -> dict[str, Any] | None:
-        changes = data.model_dump(exclude_unset=True)
+        changes = {k: v for k, v in data.model_dump(exclude_unset=True).items() if k in self._PLAYLIST_COLUMNS}
         if not changes:
             return await self.get_playlist(uid, playlist_id)
         parts: list[str] = []
@@ -1096,9 +1098,20 @@ class PostgresUserRepository:
             )
         return result == "DELETE 1"
 
+    _SNAPSHOT_TABLES: dict[str, tuple[str, str]] = {
+        "user_followed_artists": ("artist", "followed_at"),
+        "user_saved_albums":     ("album",  "saved_at"),
+    }
+
+    def _validate_snapshot_table(self, table: str, column: str, timestamp: str) -> None:
+        allowed = self._SNAPSHOT_TABLES.get(table)
+        if allowed is None or allowed != (column, timestamp):
+            raise ValueError(f"Disallowed snapshot table or column: {table!r}")
+
     async def _list_saved(
         self, uid: str, table: str, column: str, timestamp: str,
     ) -> list[dict[str, Any]]:
+        self._validate_snapshot_table(table, column, timestamp)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {column}, {timestamp} FROM {table} "
@@ -1117,6 +1130,7 @@ class PostgresUserRepository:
         self, uid: str, table: str, column: str, timestamp: str,
         seokey: str, snapshot: dict[str, Any],
     ) -> dict[str, Any]:
+        self._validate_snapshot_table(table, column, timestamp)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"INSERT INTO {table} (uid, seokey, {column}, {timestamp}) "
@@ -1130,6 +1144,8 @@ class PostgresUserRepository:
         return result
 
     async def _delete_snapshot(self, uid: str, table: str, seokey: str) -> bool:
+        if table not in self._SNAPSHOT_TABLES:
+            raise ValueError(f"Disallowed snapshot table: {table!r}")
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 f"DELETE FROM {table} WHERE uid = $1 AND seokey = $2",
