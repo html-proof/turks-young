@@ -55,8 +55,12 @@ class PersonalizedMusicService:
         uid: str,
         catalog: MusicCatalog,
         limit: int = 20,
+        refresh_generation: int = 0,
+        session_id: str | None = None,
+        exclude_ids: list[str] | set[str] | None = None,
+        cursor: int = 0,
     ) -> list[dict[str, Any]]:
-        """Return up to *limit* personalised track recommendations."""
+        """Return up to *limit* personalised track recommendations, rotated by generation."""
 
         # 1. Gather user data in parallel.
         profile, favorites, history, signals = await asyncio.gather(
@@ -66,34 +70,35 @@ class PersonalizedMusicService:
             self.repository.get_signals(uid),
         )
 
-        # 2. Build unified preference scores.
+        # 2. Build unified preference scores with rotation based on refresh_generation.
         preferences = build_preference_scores(profile, favorites, history, signals)
-        seeds     = build_search_seeds(preferences, self.MAX_SEARCH_SEEDS)
+        seeds     = build_search_seeds(preferences, self.MAX_SEARCH_SEEDS, seed_offset=refresh_generation * 2)
         languages = preferred_languages(profile, preferences, max_languages=3)
 
         # 3. Build candidate fetch jobs.
         jobs: list[tuple[str, Any]] = []
 
-        # 3a. Catalog search seeds (artist + genre interleaved).
-        per_seed = max(4, min(self.CANDIDATES_PER_SEED, limit))
+        # 3a. Catalog search seeds (artist + genre interleaved, rotating).
+        per_seed = max(4, min(self.CANDIDATES_PER_SEED * 2, limit * 2))
         for seed in seeds:
             jobs.append((
                 f"Because you like {seed}",
                 catalog.search_songs(seed, per_seed),
             ))
 
-        # 3b. Trending for ALL preferred languages (not just the top one).
+        # 3b. Trending for preferred languages.
         for lang in languages:
             jobs.append((
                 f"Trending in {lang}",
                 catalog.get_trending(lang, self.CANDIDATES_TRENDING),
             ))
 
-        # 3c. New releases in the top language.
+        # 3c. New releases in the preferred language (rotating if multiple).
         if languages and hasattr(catalog, "get_new_releases"):
+            lang_to_use = languages[refresh_generation % len(languages)]
             jobs.append((
-                f"New in {languages[0]}",
-                catalog.get_new_releases(languages[0], self.CANDIDATES_NEW),
+                f"New in {lang_to_use}",
+                catalog.get_new_releases(lang_to_use, self.CANDIDATES_NEW),
             ))
 
         # A true cold start returns no recommendations until backend-owned
@@ -107,8 +112,14 @@ class PersonalizedMusicService:
             return_exceptions=True,
         )
 
-        # 5. Flatten and filter.
-        favorite_keys: set[str] = {item.get("seokey", "") for item in favorites}
+        # 5. Flatten, exclude, and score candidates.
+        excluded_keys: set[str] = {
+            str(item.get("seokey", "")).lower() for item in favorites if item.get("seokey")
+        }
+        if exclude_ids:
+            for ex in exclude_ids:
+                if ex:
+                    excluded_keys.add(str(ex).lower().strip())
 
         # Build a recency map: seokey → most-recent played_at string.
         history_map: dict[str, str] = {}
@@ -127,8 +138,9 @@ class PersonalizedMusicService:
             for track in result:
                 if not isinstance(track, dict):
                     continue
-                seokey = track.get("seokey")
-                if not seokey or seokey in favorite_keys:
+                seokey = str(track.get("seokey") or "").lower().strip()
+                track_id = str(track.get("id") or track.get("track_id") or "").lower().strip()
+                if not seokey or seokey in excluded_keys or (track_id and track_id in excluded_keys):
                     continue
 
                 tr_score, reasons = score_track(track, preferences, source, history_map)
@@ -143,14 +155,15 @@ class PersonalizedMusicService:
                         },
                     }
 
-        # 6. Sort → diversity filter → return top-N.
+        # 6. Sort → diversity filter (no consecutive same artist) → return top-N.
         sorted_tracks = sorted(
             ranked.values(),
             key=lambda item: item["recommendation"]["score"],
             reverse=True,
         )
-        diverse_tracks = apply_diversity(sorted_tracks, self.MAX_PER_ARTIST)
-        return diverse_tracks[:limit]
+        diverse_tracks = apply_diversity(sorted_tracks, self.MAX_PER_ARTIST, max_consecutive_per_artist=1)
+        start_idx = max(0, cursor)
+        return diverse_tracks[start_idx : start_idx + limit]
 
     async def rebuild_signals_from_history(self, uid: str) -> int:
         """

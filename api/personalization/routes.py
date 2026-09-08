@@ -161,6 +161,10 @@ async def clear_signals(
 async def recommendations(
     request: Request,
     limit: int = Query(20, ge=1, le=50),
+    refresh_generation: int = Query(0, ge=0),
+    session_id: str | None = Query(None, max_length=100),
+    exclude_ids: str | None = Query(None),
+    cursor: int = Query(0, ge=0),
     user: AuthenticatedUser = Depends(get_current_user),
     repository: FirebaseUserRepository = Depends(get_user_repository),
     service: PersonalizedMusicService = Depends(get_personalization_service),
@@ -168,7 +172,16 @@ async def recommendations(
     catalog = getattr(request.app.state, "gaanapy", None)
     if catalog is None:
         raise HTTPException(status_code=503, detail="Music catalog is unavailable")
-    return await service.recommendations(user.uid, catalog, limit)
+    parsed_excludes = [x.strip() for x in exclude_ids.split(",") if x.strip()] if exclude_ids else None
+    return await service.recommendations(
+        user.uid,
+        catalog,
+        limit,
+        refresh_generation=refresh_generation,
+        session_id=session_id,
+        exclude_ids=parsed_excludes,
+        cursor=cursor,
+    )
 
 
 @router.post(

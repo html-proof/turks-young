@@ -1093,6 +1093,9 @@ class CatalogService:
         limit: int,
         offset: int = 0,
         content_type: str = "all",
+        refresh_generation: int = 0,
+        session_id: str | None = None,
+        exclude_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Build one bounded page of the home feed.
 
@@ -1103,6 +1106,20 @@ class CatalogService:
         # Fetch one look-ahead item so ``has_more`` is accurate without
         # requesting the complete catalogue.
         request_limit = min(max(limit + offset + 1, limit), 100)
+        # Call recommendations supporting both new parameters and test mocks
+        async def _fetch_recs():
+            try:
+                return await recommendations.recommendations(
+                    uid,
+                    self.catalog,
+                    request_limit,
+                    refresh_generation=refresh_generation,
+                    session_id=session_id,
+                    exclude_ids=exclude_ids,
+                )
+            except TypeError:
+                return await recommendations.recommendations(uid, self.catalog, request_limit)
+
         profile, history, favorites, albums_raw, artists_raw, playlists_raw, recommended = await asyncio.gather(
             repository.get_profile(uid),
             repository.list_history(uid, request_limit),
@@ -1110,7 +1127,7 @@ class CatalogService:
             repository.list_saved_albums(uid),
             repository.list_followed_artists(uid),
             repository.list_playlists(uid),
-            recommendations.recommendations(uid, self.catalog, request_limit),
+            _fetch_recs(),
         )
         sections: list[dict[str, Any]] = []
 
@@ -1127,9 +1144,12 @@ class CatalogService:
 
         preferred = self.languages.resolve(profile.get("language_ids") or [])
         if preferred:
+            # Rotate language index when refresh_generation > 0 so refreshing explores all user languages
+            lang_idx = refresh_generation % len(preferred)
+            chosen_lang = preferred[lang_idx].name
             trending, releases = await asyncio.gather(
-                self.catalog.get_trending(preferred[0].name, limit),
-                self.catalog.get_new_releases(preferred[0].name, limit),
+                self.catalog.get_trending(chosen_lang, limit),
+                self.catalog.get_new_releases(chosen_lang, limit),
                 return_exceptions=True,
             )
             if not isinstance(trending, Exception):

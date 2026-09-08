@@ -171,10 +171,13 @@ def build_preference_scores(
 def build_search_seeds(
     preferences: dict[str, dict[str, float]],
     max_seeds: int = 6,
+    seed_offset: int = 0,
 ) -> list[str]:
     """
     Return up to *max_seeds* sanitised search strings drawn from the
     top-scoring artists and genres, interleaved so genres appear in the mix.
+    If seed_offset > 0, rotates/shifts through the pool of available candidates
+    so consecutive refresh generations explore different artists and genres.
     """
     artists = sorted(preferences["artists"].items(), key=lambda x: x[1], reverse=True)
     genres  = sorted(preferences["genres"].items(),  key=lambda x: x[1], reverse=True)
@@ -190,16 +193,23 @@ def build_search_seeds(
     for g, _ in genres[len(artists):]:
         interleaved.append(g)
 
-    seeds: list[str] = []
+    unique_seeds: list[str] = []
     seen: set[str] = set()
     for raw in interleaved:
         seed = _safe_seed(raw)
         if seed and seed.casefold() not in seen:
-            seeds.append(seed)
+            unique_seeds.append(seed)
             seen.add(seed.casefold())
-        if len(seeds) >= max_seeds:
-            break
-    return seeds
+
+    if not unique_seeds:
+        return []
+
+    # If seed_offset is provided, rotate the pool to explore different artists/genres
+    if seed_offset > 0 and len(unique_seeds) > 1:
+        effective_offset = seed_offset % len(unique_seeds)
+        unique_seeds = unique_seeds[effective_offset:] + unique_seeds[:effective_offset]
+
+    return unique_seeds[:max_seeds]
 
 
 def preferred_languages(
@@ -291,6 +301,7 @@ def score_track(
 def apply_diversity(
     ranked: list[dict[str, Any]],
     max_per_artist: int = 3,
+    max_consecutive_per_artist: int = 1,
 ) -> list[dict[str, Any]]:
     """
     Limit the number of consecutive / total tracks from the same artist
@@ -304,12 +315,42 @@ def apply_diversity(
         artists = _items(item.get("artists"))
         key = artists[0].casefold() if artists else "__unknown__"
         count = artist_counts.get(key, 0)
-        if count < max_per_artist:
+
+        # Check consecutive artist rule
+        is_consecutive = False
+        if result and max_consecutive_per_artist >= 1:
+            prev_artists = _items(result[-1].get("artists"))
+            prev_key = prev_artists[0].casefold() if prev_artists else "__unknown__"
+            if prev_key != "__unknown__" and prev_key == key:
+                is_consecutive = True
+
+        if count < max_per_artist and not is_consecutive:
             artist_counts[key] = count + 1
             result.append(item)
         else:
             deferred.append(item)
 
-    # Append deferred tracks (beyond per-artist cap) at the end.
-    result.extend(deferred)
+    # Interleave deferred tracks where possible without creating consecutive duplicates
+    for item in deferred:
+        artists = _items(item.get("artists"))
+        key = artists[0].casefold() if artists else "__unknown__"
+        if result:
+            prev_artists = _items(result[-1].get("artists"))
+            prev_key = prev_artists[0].casefold() if prev_artists else "__unknown__"
+            if prev_key != "__unknown__" and prev_key == key:
+                inserted = False
+                for i in range(len(result) - 1, 0, -1):
+                    left_artists = _items(result[i - 1].get("artists"))
+                    right_artists = _items(result[i].get("artists"))
+                    left_key = left_artists[0].casefold() if left_artists else "__unknown__"
+                    right_key = right_artists[0].casefold() if right_artists else "__unknown__"
+                    if left_key != key and right_key != key:
+                        result.insert(i, item)
+                        inserted = True
+                        break
+                if not inserted:
+                    result.append(item)
+                continue
+        result.append(item)
+
     return result

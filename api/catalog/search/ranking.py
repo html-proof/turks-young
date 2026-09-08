@@ -300,6 +300,23 @@ def _strong_match(query: str, item: dict[str, Any], kind: str) -> bool:
     return False
 
 
+def _word_match(query: str, item: dict[str, Any], kind: str) -> bool:
+    q = normalize_query(query)
+    title, artists, album = _text(item, kind)
+    fields = [title] if kind == "artist" else [title, artists, album]
+    for value in fields:
+        normalized = normalize_query(value)
+        tokens = _tokens(normalized)
+        if (
+            normalized == q
+            or normalized.startswith(q)
+            or any(token == q or token.startswith(q) for token in tokens)
+            or q in tokens
+        ):
+            return True
+    return False
+
+
 def rank(query: str, values: list[dict[str, Any]], kind: str, limit: int) -> list[dict[str, Any]]:
     seen_ids: set[str] = set()
     fingerprint_map: dict[str, tuple[float, int, dict[str, Any]]] = {}
@@ -324,9 +341,13 @@ def rank(query: str, values: list[dict[str, Any]], kind: str, limit: int) -> lis
             fingerprint_map[fp] = (item_score, index, ranked_item)
 
     ranked = list(fingerprint_map.values())
-    strong = [item for item in ranked if _strong_match(query, item[2], kind)]
-    if strong:
-        ranked = strong
+    word_matches = [item for item in ranked if _word_match(query, item[2], kind)]
+    if word_matches:
+        ranked = word_matches
+    else:
+        strong = [item for item in ranked if _strong_match(query, item[2], kind)]
+        if strong:
+            ranked = strong
 
     q_norm = normalize_query(query)
     ranked.sort(

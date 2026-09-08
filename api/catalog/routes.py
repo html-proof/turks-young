@@ -180,6 +180,9 @@ async def save_artists(
 async def home(
     request: Request,
     refresh: bool = False,
+    refresh_generation: int = Query(0, ge=0),
+    session_id: str | None = Query(None, max_length=100),
+    exclude_ids: str | None = Query(None),
     limit: int = Query(24, ge=1, le=50),
     cursor: str | None = Query(None, max_length=100),
     type: str = Query("all", pattern="^(all|song|album|artist|playlist)$"),
@@ -188,10 +191,9 @@ async def home(
     recommendations=Depends(get_personalization_service),
 ):
     cache = getattr(request.app.state, "cache", None)
-    # Artwork normalization changed from artist-card images to track/album
-    # artwork. Version the cache key so old home cards cannot survive deploy.
-    key = f"home:v2:{user.uid}:{type}:{limit}:{cursor or '0'}"
-    if cache and not refresh:
+    # Cache key includes refresh_generation and session_id so each refresh generates unique content
+    key = f"home:v3:{user.uid}:{type}:{limit}:{cursor or '0'}:{refresh_generation}:{session_id or ''}"
+    if cache and not refresh and refresh_generation == 0:
         cached = await cache.get(key)
         if cached is not None:
             return envelope(cached, cached=True)
@@ -202,9 +204,19 @@ async def home(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="cursor must be a non-negative offset") from exc
 
+    parsed_excludes = [x.strip() for x in exclude_ids.split(",") if x.strip()] if exclude_ids else None
+
     async def build():
         return await _service(request).home_page(
-            user.uid, repository, recommendations, limit, offset, type
+            user.uid,
+            repository,
+            recommendations,
+            limit,
+            offset,
+            type,
+            refresh_generation=refresh_generation,
+            session_id=session_id,
+            exclude_ids=parsed_excludes,
         )
 
     try:
