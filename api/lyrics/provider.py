@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import re
 from difflib import SequenceMatcher
 from typing import Any
@@ -183,28 +184,42 @@ class LRCLibProvider(LyricsProvider):
             await self.session.close()
 
     async def _request(self, path: str, params: dict[str, Any]) -> Any:
-        try:
-            async with self.session.get(
-                f"{self.BASE_URL}/{path}",
-                params=params,
-                headers=self.headers,
-                timeout=self.timeout,
-            ) as response:
-                if response.status == 404:
-                    return None
-                if response.status == 429:
-                    raw_retry = response.headers.get("Retry-After", "5")
-                    try:
-                        retry_after = max(1, int(raw_retry))
-                    except ValueError:
-                        retry_after = 5
-                    raise LyricsRateLimited(retry_after)
-                response.raise_for_status()
-                return await response.json()
-        except LyricsRateLimited:
-            raise
-        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
-            raise LyricsProviderError("Lyrics provider is unavailable") from exc
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                async with self.session.get(
+                    f"{self.BASE_URL}/{path}",
+                    params=params,
+                    headers=self.headers,
+                    timeout=self.timeout,
+                ) as response:
+                    if response.status == 404:
+                        return None
+                    if response.status == 429:
+                        raw_retry = response.headers.get("Retry-After", "5")
+                        try:
+                            retry_after = max(1, int(raw_retry))
+                        except ValueError:
+                            retry_after = 5
+                        raise LyricsRateLimited(retry_after)
+                    if response.status in (500, 502, 503, 504) and attempt == 0:
+                        await asyncio.sleep(0.3)
+                        continue
+                    response.raise_for_status()
+                    return await response.json()
+            except LyricsRateLimited:
+                raise
+            except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+                last_exc = exc
+                if attempt == 0:
+                    await asyncio.sleep(0.3)
+                    continue
+                detail = f"{exc.__class__.__name__}: {exc}" if str(exc) else exc.__class__.__name__
+                raise LyricsProviderError(f"Lyrics provider is unavailable ({detail})") from exc
+
+        if last_exc:
+            detail = f"{last_exc.__class__.__name__}: {last_exc}" if str(last_exc) else last_exc.__class__.__name__
+            raise LyricsProviderError(f"Lyrics provider is unavailable ({detail})") from last_exc
 
     async def get_lyrics(self, track: dict[str, Any]) -> dict[str, Any] | None:
         title = track.get("title", "").strip()
@@ -217,32 +232,41 @@ class LRCLibProvider(LyricsProvider):
         # Step 1: Direct exact get endpoint with album and duration
         if title and artists:
             if duration and album:
-                exact = await self._request("get", {
-                    "track_name": normalize_track_name(title),
-                    "artist_name": artists,
-                    "album_name": album,
-                    "duration": duration,
-                })
-                if exact and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("instrumental")):
-                    return exact
+                try:
+                    exact = await self._request("get", {
+                        "track_name": normalize_track_name(title),
+                        "artist_name": artists,
+                        "album_name": album,
+                        "duration": duration,
+                    })
+                    if exact and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("instrumental")):
+                        return exact
+                except (LyricsProviderError, Exception):
+                    pass
 
             if duration:
-                exact = await self._request("get", {
-                    "track_name": normalize_track_name(title),
-                    "artist_name": artists,
-                    "duration": duration,
-                })
-                if exact and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("instrumental")):
-                    return exact
+                try:
+                    exact = await self._request("get", {
+                        "track_name": normalize_track_name(title),
+                        "artist_name": artists,
+                        "duration": duration,
+                    })
+                    if exact and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("instrumental")):
+                        return exact
+                except (LyricsProviderError, Exception):
+                    pass
 
             if clean_title != title and primary_artist and duration:
-                exact = await self._request("get", {
-                    "track_name": clean_title,
-                    "artist_name": primary_artist,
-                    "duration": duration,
-                })
-                if exact and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("instrumental")):
-                    return exact
+                try:
+                    exact = await self._request("get", {
+                        "track_name": clean_title,
+                        "artist_name": primary_artist,
+                        "duration": duration,
+                    })
+                    if exact and (exact.get("syncedLyrics") or exact.get("plainLyrics") or exact.get("instrumental")):
+                        return exact
+                except (LyricsProviderError, Exception):
+                    pass
 
         # Step 2: Multi-query Search
         search_queries: list[dict[str, str]] = []
@@ -256,6 +280,7 @@ class LRCLibProvider(LyricsProvider):
 
         all_candidates: list[dict[str, Any]] = []
         seen_ids = set()
+        last_provider_error: LyricsProviderError | None = None
 
         for query_params in search_queries:
             try:
@@ -270,12 +295,17 @@ class LRCLibProvider(LyricsProvider):
                     best = max(all_candidates, key=lambda item: _candidate_score(item, track))
                     if _candidate_score(best, track) >= 75 and best.get("syncedLyrics"):
                         return best
-            except (LyricsRateLimited, LyricsProviderError):
+            except LyricsRateLimited:
                 raise
+            except LyricsProviderError as exc:
+                last_provider_error = exc
+                continue
             except Exception:
                 pass
 
         if not all_candidates:
+            if last_provider_error and not seen_ids:
+                raise last_provider_error
             return None
 
         # Filter and rank candidates

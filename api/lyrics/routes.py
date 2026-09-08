@@ -59,8 +59,10 @@ async def _lyrics_for_track(
             content={"detail": "Lyrics provider rate limit reached", "status": "rate_limited"},
         )
     except LyricsProviderError as exc:
-        logger.warning("Lyrics provider error for %s: %s", track_id, exc)
-        return {
+        cause = exc.__cause__
+        cause_msg = f" (cause: {cause.__class__.__name__}: {cause})" if cause else ""
+        logger.warning("Lyrics provider error for %s: %s%s", track_id, exc, cause_msg)
+        fallback = {
             "trackId": track_id,
             "provider": None,
             "providerId": None,
@@ -70,6 +72,12 @@ async def _lyrics_for_track(
             "plainLyrics": None,
             "lines": [],
         }
+        if cache:
+            try:
+                await cache.set(f"lyrics:{track_id}", fallback, 60)
+            except Exception:
+                pass
+        return fallback
 
 
 @router.get(
