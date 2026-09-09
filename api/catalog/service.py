@@ -138,7 +138,9 @@ class CatalogService:
                 )
                 res: list[dict[str, Any]] = []
                 for row in rows:
-                    img = row["image_url"] or ""
+                    img = str(row["image_url"] or "").strip()
+                    if "dzcdn.net" in img or img.startswith("{") or "placeholder" in img:
+                        img = ""
                     res.append({
                         "id": row["id"],
                         "seokey": row["id"],
@@ -263,14 +265,16 @@ class CatalogService:
                             artist_id, name,
                         )
                         if row and row["image_url"]:
-                            return {
-                                "id": row["id"],
-                                "name": row["name"],
-                                "image_url": row["image_url"],
-                                "imageUrl": row["image_url"],
-                                "image_status": "verified",
-                                "source": "database",
-                            }
+                            img = str(row["image_url"]).strip()
+                            if img and "dzcdn.net" not in img and not img.startswith("{") and "placeholder" not in img:
+                                return {
+                                    "id": row["id"],
+                                    "name": row["name"],
+                                    "image_url": img,
+                                    "imageUrl": img,
+                                    "image_status": "verified",
+                                    "source": "database",
+                                }
                 except Exception as exc:
                     logger.debug("db artist portrait lookup failed: %s", exc)
 
@@ -743,12 +747,15 @@ class CatalogService:
                                 artist_id, artist_id.replace('-', ' '),
                             )
                             if db_row:
+                                img = str(db_row["image_url"] or "").strip()
+                                if "dzcdn.net" in img or img.startswith("{") or "placeholder" in img:
+                                    img = ""
                                 raw = {
                                     "id": db_row["id"],
                                     "seokey": db_row["id"],
                                     "name": db_row["name"],
-                                    "image_url": db_row["image_url"] or "",
-                                    "imageUrl": db_row["image_url"] or "",
+                                    "image_url": img,
+                                    "imageUrl": img,
                                     "top_tracks": [],
                                 }
                                 result = [raw]
@@ -777,9 +784,11 @@ class CatalogService:
                             normalized_artist.get("name") or "",
                         )
                         if db_row and db_row["image_url"]:
-                            normalized_artist["image_url"] = db_row["image_url"]
-                            normalized_artist["imageUrl"] = db_row["image_url"]
-                            normalized_artist["image_status"] = "verified"
+                            db_img = str(db_row["image_url"]).strip()
+                            if db_img and "dzcdn.net" not in db_img and not db_img.startswith("{") and "placeholder" not in db_img:
+                                normalized_artist["image_url"] = db_img
+                                normalized_artist["imageUrl"] = db_img
+                                normalized_artist["image_status"] = "verified"
                 except Exception as exc:
                     logger.debug("artist_details db image hydration failed: %s", exc)
 
@@ -835,7 +844,7 @@ class CatalogService:
 
         return await self._cached(
             f"music:artist_details:{artist_id}:{limit}:v1",
-            config.TTL_ARTIST_DETAILS,
+            getattr(config, "TTL_ARTIST_DETAILS", config.TTL_ARTIST),
             load,
             config.STALE_CACHE_TTL,
         )
