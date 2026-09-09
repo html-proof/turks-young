@@ -1,27 +1,46 @@
+import ast
+import json
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
-import re
-
 SEO_KEY_PATTERN = r"^[a-zA-Z0-9\-_./%\[\]()+@]+$"
+
+
+def _is_artist_noise(s: str) -> bool:
+    if not s:
+        return True
+    s_clean = str(s).lower().strip().strip("'\"{}[]")
+    if not s_clean:
+        return True
+    if s_clean.startswith("type:") or s_clean.startswith("type :"):
+        return True
+    if "artist}" in s_clean or "{artist" in s_clean or "'type'" in s_clean or '"type"' in s_clean:
+        return True
+    if s_clean in ("artist", "artists", "singer", "singers", "song", "track", "album", "true", "false", "none", "null"):
+        return True
+    return False
 
 
 def _clean_str_item(val: Any) -> str:
     if val is None:
         return ""
     if isinstance(val, dict):
-        return str(val.get("name") or val.get("title") or val.get("id") or val.get("seokey") or "").strip()
+        name = str(val.get("name") or val.get("title") or val.get("id") or val.get("seokey") or "").strip()
+        return "" if _is_artist_noise(name) else name
     s = str(val).strip()
-    if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+    if _is_artist_noise(s):
+        return ""
+    if (s.startswith("{") or s.startswith("'") or s.startswith('"') or s.startswith("[")) and ("name" in s or "id" in s):
         match = re.search(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
-        if match:
+        if match and not _is_artist_noise(match.group(1)):
             return match.group(1).strip()
         match_id = re.search(r"['\"](?:id|seokey|artist_id)['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
-        if match_id:
+        if match_id and not _is_artist_noise(match_id.group(1)):
             return match_id.group(1).strip()
-    return s
+    s = re.sub(r"^[{}\[\]\'\"\s]+|[{}\[\]\'\"\s]+$", "", s).strip()
+    return "" if _is_artist_noise(s) else s
 
 
 def _list_from_value(value: Any) -> list[str]:
@@ -29,13 +48,29 @@ def _list_from_value(value: Any) -> list[str]:
         return []
     if isinstance(value, str):
         s = value.strip()
-        if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
-            c = _clean_str_item(s)
-            values = [c] if c else []
-        else:
-            values = s.split(",")
+        if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+            try:
+                parsed = json.loads(s.replace("'", '"'))
+                return _list_from_value(parsed)
+            except Exception:
+                pass
+            try:
+                parsed = ast.literal_eval(s)
+                return _list_from_value(parsed)
+            except Exception:
+                pass
+        cleaned_str = re.sub(r"""['"]?type['"]?\s*:\s*['"]?[a-zA-Z0-9_\-]+['"]?\}?""", "", s, flags=re.IGNORECASE)
+        cleaned_str = re.sub(r"""['"]?(?:id|seokey|artist_id)['"]\s*:\s*['"]([^'"]+)['"]""", r"\1", cleaned_str)
+        cleaned_str = re.sub(r"""['"]?name['"]\s*:\s*['"]([^'"]+)['"]""", r"\1", cleaned_str)
+        cleaned_str = re.sub(r"""[\{\}\[\]]""", "", cleaned_str)
+        values = cleaned_str.split(",")
     elif isinstance(value, (list, tuple, set)):
-        values = list(value)
+        values = []
+        for x in value:
+            if isinstance(x, str) and (x.strip().startswith("[") or x.strip().startswith("{") or "," in x):
+                values.extend(_list_from_value(x))
+            else:
+                values.append(x)
     else:
         values = [value]
 
@@ -43,11 +78,33 @@ def _list_from_value(value: Any) -> list[str]:
     seen: set[str] = set()
     for item in values:
         normalized = _clean_str_item(item)
+        if not normalized or _is_artist_noise(normalized):
+            continue
         key = normalized.casefold()
-        if normalized and key not in seen:
+        if key not in seen:
             unique.append(normalized)
             seen.add(key)
-    return unique
+
+    # Subsume slugs if full display name exists
+    filtered: list[str] = []
+    for item in unique:
+        is_slug = bool(re.match(r'^[a-z0-9\-]+$', item) and '-' in item)
+        is_subsumed = False
+        for other in unique:
+            if other != item and ' ' in other:
+                other_words = [w.lower() for w in re.split(r'[\s\-]+', other) if w]
+                item_words = [w.lower() for w in re.split(r'[\s\-]+', item) if w]
+                if is_slug and any(w1 in w2 or w2 in w1 for w1 in item_words for w2 in other_words):
+                    is_subsumed = True
+                    break
+                slug = re.sub(r'[^a-zA-Z0-9]+', '', item).lower()
+                other_slug = re.sub(r'[^a-zA-Z0-9]+', '', other).lower()
+                if slug == other_slug or slug in other_slug or other_slug in slug:
+                    is_subsumed = True
+                    break
+        if not is_subsumed:
+            filtered.append(item)
+    return filtered
 
 
 class ProfileUpdate(BaseModel):

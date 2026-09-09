@@ -1,3 +1,5 @@
+import ast
+import json
 import re
 from typing import Any
 
@@ -63,20 +65,37 @@ def _upgrade_image_quality(url: str | None) -> str | None:
     return url
 
 
+def _is_artist_noise(s: str) -> bool:
+    if not s:
+        return True
+    s_clean = str(s).lower().strip().strip("'\"{}[]")
+    if not s_clean:
+        return True
+    if any(k in s_clean for k in ("type:", "'type'", '"type"', "artist}", "{artist", "artist_id:", "seokey:")):
+        return True
+    if s_clean in ("artist", "artists", "singer", "singers", "song", "track", "album", "true", "false", "none", "null"):
+        return True
+    return False
+
+
 def _clean_artist_str(val: Any) -> str:
     if val is None:
         return ""
     if isinstance(val, dict):
-        return str(val.get("name") or val.get("title") or val.get("id") or val.get("seokey") or "").strip()
+        name = str(val.get("name") or val.get("title") or val.get("id") or val.get("seokey") or "").strip()
+        return "" if _is_artist_noise(name) else name
     s = str(val).strip()
-    if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+    if _is_artist_noise(s):
+        return ""
+    if (s.startswith("{") or s.startswith("'") or s.startswith('"') or s.startswith("[")) and ("name" in s or "id" in s):
         match = re.search(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
-        if match:
+        if match and not _is_artist_noise(match.group(1)):
             return match.group(1).strip()
         match_id = re.search(r"['\"](?:id|seokey|artist_id)['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
-        if match_id:
+        if match_id and not _is_artist_noise(match_id.group(1)):
             return match_id.group(1).strip()
-    return s
+    s = re.sub(r"^[{}\[\]\'\"\s]+|[{}\[\]\'\"\s]+$", "", s).strip()
+    return "" if _is_artist_noise(s) else s
 
 
 def _clean_artist_id(val: Any) -> str:
@@ -89,7 +108,8 @@ def _clean_artist_id(val: Any) -> str:
         match = re.search(r"['\"](?:id|seokey|artist_id)['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
         if match:
             return match.group(1).strip()
-    return s
+    s = re.sub(r"^[{}\[\]\'\"\s]+|[{}\[\]\'\"\s]+$", "", s).strip()
+    return "" if _is_artist_noise(s) else s
 
 
 def _clean_artist_entry(val: Any) -> tuple[str, str]:
@@ -100,15 +120,105 @@ def _clean_artist_entry(val: Any) -> tuple[str, str]:
         aid = _clean_artist_id(val.get("id") or val.get("seokey") or val.get("artist_id"))
         return name, aid
     s = str(val).strip()
+    if _is_artist_noise(s):
+        return "", ""
     if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
         name = _clean_artist_str(s)
         aid = _clean_artist_id(s)
         return name, aid
-    return s, ""
+    clean = _clean_artist_str(s)
+    return clean, ""
 
 
 def _slugify_artist_name(name: str) -> str:
     return re.sub(r'[^a-zA-Z0-9]+', '-', str(name or '')).strip('-').lower()
+
+
+def _dedupe_artist_tuples(tuples: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    unique: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, aid in tuples:
+        name_clean = name.strip()
+        if not name_clean or _is_artist_noise(name_clean):
+            continue
+        key = name_clean.casefold()
+        if key not in seen:
+            unique.append((name_clean, aid.strip()))
+            seen.add(key)
+
+    filtered: list[tuple[str, str]] = []
+    for name, aid in unique:
+        is_slug = bool(re.match(r'^[a-z0-9\-]+$', name) and '-' in name)
+        is_subsumed = False
+        for other_name, _ in unique:
+            if other_name != name and ' ' in other_name:
+                other_words = [w.lower() for w in re.split(r'[\s\-]+', other_name) if w]
+                name_words = [w.lower() for w in re.split(r'[\s\-]+', name) if w]
+                if is_slug and any(w1 in w2 or w2 in w1 for w1 in name_words for w2 in other_words):
+                    is_subsumed = True
+                    break
+                slug = re.sub(r'[^a-zA-Z0-9]+', '', name).lower()
+                other_slug = re.sub(r'[^a-zA-Z0-9]+', '', other_name).lower()
+                if slug == other_slug or slug in other_slug or other_slug in slug:
+                    is_subsumed = True
+                    break
+        if not is_subsumed:
+            filtered.append((name, aid))
+    return filtered
+
+
+def _parse_artists_from_raw(val: Any) -> list[tuple[str, str]]:
+    if not val:
+        return []
+    if isinstance(val, list):
+        res: list[tuple[str, str]] = []
+        for item in val:
+            if isinstance(item, dict):
+                n = _clean_artist_str(item.get("name") or item.get("title"))
+                i = _clean_artist_id(item.get("id") or item.get("seokey") or item.get("artist_id"))
+                if n and not _is_artist_noise(n):
+                    res.append((n, i))
+            elif isinstance(item, str):
+                res.extend(_parse_artists_from_raw(item))
+        return _dedupe_artist_tuples(res)
+    if isinstance(val, dict):
+        n = _clean_artist_str(val.get("name") or val.get("title"))
+        i = _clean_artist_id(val.get("id") or val.get("seokey") or val.get("artist_id"))
+        if n and not _is_artist_noise(n):
+            return [(n, i)]
+        return []
+    s = str(val).strip()
+    if not s:
+        return []
+    if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+        try:
+            parsed = json.loads(s.replace("'", '"'))
+            res = _parse_artists_from_raw(parsed)
+            if res:
+                return res
+        except Exception:
+            pass
+        try:
+            parsed = ast.literal_eval(s)
+            res = _parse_artists_from_raw(parsed)
+            if res:
+                return res
+        except Exception:
+            pass
+    cleaned_str = re.sub(r"""['"]?type['"]?\s*:\s*['"]?[a-zA-Z0-9_\-]+['"]?\}?""", "", s, flags=re.IGNORECASE)
+    cleaned_str = re.sub(r"""['"]?(?:id|seokey|artist_id)['"]\s*:\s*['"]([^'"]+)['"]""", r"\1", cleaned_str)
+    cleaned_str = re.sub(r"""['"]?name['"]\s*:\s*['"]([^'"]+)['"]""", r"\1", cleaned_str)
+    cleaned_str = re.sub(r"""[\{\}\[\]]""", "", cleaned_str)
+    parts = re.split(r",\s*|;\s*", cleaned_str)
+    res = []
+    for part in parts:
+        cn = _clean_artist_str(part)
+        if cn and not _is_artist_noise(cn):
+            aid = ""
+            if any(k in part.lower() for k in ("id:", "seokey:", "'id'", '"id"')):
+                aid = _clean_artist_id(part)
+            res.append((cn, aid))
+    return _dedupe_artist_tuples(res)
 
 
 def _normalize_artists_list(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -154,6 +264,8 @@ def _normalize_artists_list(item: dict[str, Any]) -> list[dict[str, Any]]:
         for index, a in enumerate(raw_artists):
             if isinstance(a, dict):
                 clean_name, clean_id = _clean_artist_entry(a)
+                if not clean_name or _is_artist_noise(clean_name):
+                    continue
                 if not clean_id and clean_name:
                     clean_id = _slugify_artist_name(clean_name)
                 clean_image = a.get("image_url") or a.get("imageUrl") or a.get("image") or a.get("atw") or ""
@@ -177,8 +289,7 @@ def _normalize_artists_list(item: dict[str, Any]) -> list[dict[str, Any]]:
                     record["image_status"] = "verified"
                 clean_list.append(record)
             elif isinstance(a, str):
-                cn, cid = _clean_artist_entry(a)
-                if cn:
+                for cn, cid in _parse_artists_from_raw(a):
                     clean_id = cid or _slugify_artist_name(cn)
                     clean_img_str = (
                         artist_img_map.get(clean_id.lower())
@@ -196,88 +307,50 @@ def _normalize_artists_list(item: dict[str, Any]) -> list[dict[str, Any]]:
                         rec["image_status"] = "verified"
                     clean_list.append(rec)
         if clean_list:
-            return clean_list
+            deduped = []
+            for rec in clean_list:
+                rname = rec["name"]
+                is_slug = bool(re.match(r'^[a-z0-9\-]+$', rname) and '-' in rname)
+                is_subsumed = False
+                for other in clean_list:
+                    if other["name"] != rname and ' ' in other["name"]:
+                        other_words = [w.lower() for w in re.split(r'[\s\-]+', other["name"]) if w]
+                        r_words = [w.lower() for w in re.split(r'[\s\-]+', rname) if w]
+                        if is_slug and any(w1 in w2 or w2 in w1 for w1 in r_words for w2 in other_words):
+                            is_subsumed = True
+                            break
+                        slug = re.sub(r'[^a-zA-Z0-9]+', '', rname).lower()
+                        other_slug = re.sub(r'[^a-zA-Z0-9]+', '', other["name"]).lower()
+                        if slug == other_slug or slug in other_slug or other_slug in slug:
+                            is_subsumed = True
+                            break
+                if not is_subsumed:
+                    deduped.append(rec)
+            return deduped or clean_list
 
-    names: list[str] = []
-    inline_ids: list[str] = []
-    if isinstance(raw_artists, list):
-        for x in raw_artists:
-            cn, cid = _clean_artist_entry(x)
-            if cn:
-                names.append(cn)
-                inline_ids.append(cid)
-    elif isinstance(raw_artists, str) and raw_artists.strip():
-        s = raw_artists.strip()
-        if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
-            cn, cid = _clean_artist_entry(s)
-            if cn:
-                names.append(cn)
-                inline_ids.append(cid)
-        else:
-            for part in s.split(","):
-                cn = _clean_artist_str(part)
-                if cn:
-                    names.append(cn)
-                    inline_ids.append("")
-
-    if not names:
-        if isinstance(raw_artist, dict):
-            cn, cid = _clean_artist_entry(raw_artist)
-            if cn:
-                clean_id = cid or _slugify_artist_name(cn)
-                clean_img_str = (
-                    _upgrade_image_quality(
-                        raw_artist.get("atw") or raw_artist.get("artwork_large")
-                        or raw_artist.get("image_url") or raw_artist.get("imageUrl")
-                    )
-                    or artist_img_map.get(clean_id.lower())
-                    or artist_img_map.get(cn.lower())
-                    or primary_artist_img
-                )
-                rec = {
-                    "id": clean_id,
-                    "name": cn,
-                    "type": "artist",
-                }
-                if clean_img_str:
-                    rec["image_url"] = clean_img_str
-                    rec["imageUrl"] = clean_img_str
-                    rec["image_status"] = "verified"
-                return [rec]
-        elif isinstance(raw_artist, str) and raw_artist.strip():
-            s = raw_artist.strip()
-            if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
-                cn, cid = _clean_artist_entry(s)
-                if cn:
-                    names.append(cn)
-                    inline_ids.append(cid)
-            else:
-                for part in s.split(","):
-                    cn = _clean_artist_str(part)
-                    if cn:
-                        names.append(cn)
-                        inline_ids.append("")
+    parsed_tuples = _parse_artists_from_raw(raw_artists)
+    if not parsed_tuples:
+        parsed_tuples = _parse_artists_from_raw(raw_artist)
 
     ids: list[str] = []
     if isinstance(raw_ids, list):
         for x in raw_ids:
             cid = _clean_artist_id(x)
-            if cid:
+            if cid and not _is_artist_noise(cid):
                 ids.append(cid)
     elif isinstance(raw_ids, str) and raw_ids.strip():
-        ids = [_clean_artist_id(x) for x in raw_ids.split(",") if _clean_artist_id(x)]
+        ids = [_clean_artist_id(x) for x in raw_ids.split(",") if _clean_artist_id(x) and not _is_artist_noise(x)]
 
     result: list[dict[str, Any]] = []
-    for index, name in enumerate(names):
-        if not name:
+    for index, (name, aid) in enumerate(parsed_tuples):
+        if not name or _is_artist_noise(name):
             continue
-        artist_id = ""
-        if index < len(ids) and ids[index]:
-            artist_id = ids[index]
-        elif index < len(inline_ids) and inline_ids[index]:
-            artist_id = inline_ids[index]
-        else:
-            artist_id = _slugify_artist_name(name)
+        artist_id = aid
+        if not artist_id:
+            if index < len(ids) and ids[index]:
+                artist_id = ids[index]
+            else:
+                artist_id = _slugify_artist_name(name)
         clean_img_str = (
             artist_img_map.get(artist_id.lower())
             or artist_img_map.get(name.lower())
@@ -297,15 +370,18 @@ def _normalize_artists_list(item: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _csv(value: Any) -> list[str]:
+    parsed = _parse_artists_from_raw(value)
+    if parsed:
+        return [p[0] for p in parsed]
     if isinstance(value, list):
         out: list[str] = []
         for item in value:
             c = _clean_artist_str(item)
-            if c:
+            if c and not _is_artist_noise(c):
                 out.append(c)
         return out
     s = _clean_artist_str(value)
-    return [item.strip() for item in s.split(",") if item.strip()]
+    return [item.strip() for item in s.split(",") if item.strip() and not _is_artist_noise(item)]
 
 
 def _image(item: dict[str, Any]) -> str | None:

@@ -724,3 +724,28 @@ def test_artist_portrait_extraction_from_artist_detail():
     assert norm["artist"]["image_url"] == norm["artists"][0]["image_url"]
 
 
+def test_artist_cleanup_of_stringified_type_artist_noise_and_slugs():
+    # 1. Exact user screenshot case:
+    raw1 = {
+        "id": "karineela-kannilenthedi",
+        "title": "KARINEELA KANNILENTHEDI",
+        "artists": "vineet-srinivasan, Vineeth Sreenivasan, 'type': 'artist'}, sujatha, Sujatha Mohan",
+    }
+    norm1 = song(raw1)
+    names1 = [a["name"] for a in norm1["artists"]]
+    assert names1 == ["Vineeth Sreenivasan", "Sujatha Mohan"]
+    assert "type" not in str(names1).lower()
+
+    # 2. Stringified list of dicts with type: artist
+    raw2 = {
+        "id": "karineela-kannilenthedi-2",
+        "title": "KARINEELA KANNILENTHEDI",
+        "artists": "[{'id': 'vineet-srinivasan', 'name': 'Vineeth Sreenivasan', 'type': 'artist'}, {'id': 'sujatha', 'name': 'Sujatha Mohan', 'type': 'artist'}]",
+    }
+    norm2 = song(raw2)
+    names2 = [a["name"] for a in norm2["artists"]]
+    assert names2 == ["Vineeth Sreenivasan", "Sujatha Mohan"]
+    assert norm2["artists"][0]["id"] == "vineet-srinivasan"
+    assert norm2["artists"][1]["id"] == "sujatha"
+
+
