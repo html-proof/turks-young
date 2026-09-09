@@ -100,10 +100,12 @@ class RedisCache:
 
     @staticmethod
     async def _eval_loader(loader) -> Any:
+        if not callable(loader):
+            return loader
         if inspect.iscoroutinefunction(loader):
             return await loader()
         res = loader()
-        if asyncio.iscoroutine(res):
+        if asyncio.iscoroutine(res) or inspect.isawaitable(res):
             return await res
         return res
 
