@@ -45,14 +45,22 @@ class MixGenerator:
         track_counts: dict[str, int] = {}
         track_store: dict[str, dict[str, Any]] = {}
         for h in history:
-            tid = str(h.get("id") or h.get("seokey") or h.get("song_id") or "").lower().strip()
+            ev = h.get("event") if (isinstance(h, dict) and "event" in h and h.get("event")) else h
+            if isinstance(ev, str):
+                try:
+                    ev = json.loads(ev)
+                except Exception:
+                    ev = h
+            if not isinstance(ev, dict):
+                ev = h
+            tid = str(ev.get("song_id") or ev.get("seokey") or ev.get("track_id") or ev.get("id") or h.get("song_id") or h.get("seokey") or "").lower().strip()
             if not tid:
                 continue
-            ratio = float(h.get("completion_ratio") or (1.0 if h.get("completed") else 0.5))
-            if ratio >= 0.70:
+            ratio = float(ev.get("completion_ratio") or (1.0 if ev.get("completed") else 0.5))
+            if ratio >= 0.50:
                 track_counts[tid] = track_counts.get(tid, 0) + 1
                 if tid not in track_store:
-                    track_store[tid] = song(h)
+                    track_store[tid] = song(ev)
 
         repeated_tracks = [
             track_store[tid]
@@ -77,17 +85,25 @@ class MixGenerator:
         # 2. "Rediscover" Mix (formerly favorited / high-engagement tracks not played in > 21 days)
         recent_3w_ids = set()
         for h in history:
-            ts_str = h.get("played_at") or h.get("started_at")
+            ev = h.get("event") if (isinstance(h, dict) and "event" in h and h.get("event")) else h
+            if isinstance(ev, str):
+                try:
+                    ev = json.loads(ev)
+                except Exception:
+                    ev = h
+            if not isinstance(ev, dict):
+                ev = h
+            ts_str = h.get("played_at") or h.get("started_at") or ev.get("played_at")
             if ts_str:
                 try:
-                    p_time = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    p_time = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
                     if not p_time.tzinfo:
                         p_time = p_time.replace(tzinfo=timezone.utc)
                     if (now - p_time) <= timedelta(days=21):
-                        tid = str(h.get("id") or h.get("seokey") or "").lower().strip()
+                        tid = str(ev.get("song_id") or ev.get("seokey") or ev.get("track_id") or ev.get("id") or h.get("song_id") or "").lower().strip()
                         if tid:
                             recent_3w_ids.add(tid)
-                except ValueError:
+                except (ValueError, TypeError):
                     pass
 
         rediscover_tracks = []
@@ -115,11 +131,13 @@ class MixGenerator:
         sorted_artists = sorted(profile.artists.items(), key=lambda x: x[1], reverse=True)
         if len(sorted_artists) >= 2:
             # Daily Mix 1 around top artist
-            art1 = sorted_artists[0][0]
+            art1 = sorted_artists[0][0].lower()
             mix1_tracks = [
                 c for c in candidates
-                if any(art1 in str(a.get("name") or a.get("id") if isinstance(a, dict) else a).lower()
-                       for a in (c.get("artists") or [c.get("artist")] or []))
+                if art1 in str(c.get("artist") or "").lower() or any(
+                    art1 in str(a.get("name") if isinstance(a, dict) else a).lower()
+                    for a in (c.get("artists") or [])
+                )
             ][:20]
             if not mix1_tracks:
                 mix1_tracks = candidates[:15]
@@ -137,11 +155,13 @@ class MixGenerator:
             ))
 
             # Daily Mix 2 around second top artist
-            art2 = sorted_artists[1][0]
+            art2 = sorted_artists[1][0].lower()
             mix2_tracks = [
                 c for c in candidates
-                if any(art2 in str(a.get("name") or a.get("id") if isinstance(a, dict) else a).lower()
-                       for a in (c.get("artists") or [c.get("artist")] or []))
+                if art2 in str(c.get("artist") or "").lower() or any(
+                    art2 in str(a.get("name") if isinstance(a, dict) else a).lower()
+                    for a in (c.get("artists") or [])
+                )
             ][:20]
             if mix2_tracks:
                 mixes.append(GeneratedPlaylistSnapshot(
@@ -158,19 +178,18 @@ class MixGenerator:
 
         # 4. Language-specific Mixes (e.g. "Your Malayalam Mix", "Your Tamil Mix")
         for lang_name, affinity in sorted(profile.languages.items(), key=lambda x: x[1], reverse=True)[:2]:
-            if affinity < 0.2:
-                continue
             lang_tracks = [
                 c for c in candidates
-                if str(c.get("language") or "").lower().strip() == lang_name.lower().strip()
+                if str(c.get("language") or "").lower() == lang_name.lower()
             ][:20]
             if lang_tracks:
+                lang_clean = lang_name.title()
                 mixes.append(GeneratedPlaylistSnapshot(
-                    id=f"mix:lang_{lang_name}:{user_id}",
+                    id=f"mix:{lang_name.lower()}:{user_id}",
                     user_id=user_id,
-                    mix_type=f"language_{lang_name}",
-                    title=f"Your {lang_name.title()} Mix",
-                    description=f"Personalized mix of your favorite {lang_name.title()} tracks.",
+                    mix_type=f"language_{lang_name.lower()}",
+                    title=f"Your {lang_clean} Mix",
+                    description=f"The best {lang_clean} music tailored for you.",
                     tracks=lang_tracks,
                     cover_url=lang_tracks[0].get("image_url") if lang_tracks else None,
                     algorithm_version="rec_v2",

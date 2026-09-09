@@ -419,10 +419,70 @@ class PostgresUserRepository:
                 json.dumps(profile_data.get("artists", {})),
                 json.dumps(profile_data.get("genres", {})),
                 json.dumps(profile_data.get("eras", {})),
-                json.dumps(profile_data.get("current_session", {})),
+                json.dumps(profile_data.get("session_intent") or profile_data.get("current_session", {})),
                 json.dumps(profile_data.get("metrics", {})),
                 profile_data.get("algorithm_version", "rec_v2"),
             )
+
+    async def save_generated_playlist(self, uid: str, mix: dict[str, Any]) -> None:
+        track_ids = mix.get("track_ids") or [
+            str(t.get("id") or t.get("seokey") or t.get("track_id") or "")
+            for t in mix.get("tracks", [])
+            if str(t.get("id") or t.get("seokey") or t.get("track_id") or "").strip()
+        ]
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO generated_playlists (
+                    id, user_id, mix_type, title, description, track_ids, tracks, cover_url, algorithm_version, generated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, now())
+                ON CONFLICT (id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    track_ids = EXCLUDED.track_ids,
+                    tracks = EXCLUDED.tracks,
+                    cover_url = EXCLUDED.cover_url,
+                    algorithm_version = EXCLUDED.algorithm_version,
+                    generated_at = now();
+                """,
+                mix["id"],
+                uid,
+                mix.get("mix_type", "daily_mix"),
+                mix.get("title", ""),
+                mix.get("description", ""),
+                track_ids,
+                json.dumps(mix.get("tracks", [])),
+                mix.get("cover_url"),
+                mix.get("algorithm_version", "rec_v2"),
+            )
+
+    async def list_generated_playlists(self, uid: str) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, user_id, mix_type, title, description, track_ids, tracks, cover_url, algorithm_version, generated_at
+                FROM generated_playlists
+                WHERE user_id = $1
+                ORDER BY generated_at DESC
+                """,
+                uid,
+            )
+        out = []
+        for r in rows:
+            tracks = json.loads(r["tracks"]) if isinstance(r["tracks"], str) else (r["tracks"] or [])
+            out.append({
+                "id": r["id"],
+                "user_id": r["user_id"],
+                "mix_type": r["mix_type"],
+                "title": r["title"],
+                "description": r["description"],
+                "track_ids": r["track_ids"] or [],
+                "tracks": tracks,
+                "cover_url": r["cover_url"],
+                "algorithm_version": r["algorithm_version"],
+                "generated_at": r["generated_at"].isoformat() if r["generated_at"] else None,
+            })
+        return out
 
     async def record_impressions(
         self,
