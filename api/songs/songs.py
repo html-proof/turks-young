@@ -81,10 +81,11 @@ class Songs:
         data['artist_ids'] = await functions.findArtistIds(
             results.get('artist') or []
         )
-        artist_detail = results.get('artist_detail')
+        artist_detail = results.get('artist_detail') or results.get('artist') or []
+        data['artist_detail'] = artist_detail
         data['artist_image'] = (
             artist_detail[0].get('atw', '')
-            if artist_detail and isinstance(artist_detail, list) and len(artist_detail) > 0
+            if artist_detail and isinstance(artist_detail, list) and len(artist_detail) > 0 and isinstance(artist_detail[0], dict)
             else ''
         )
         data['album'] = results.get('album_title') or results.get('album') or ''

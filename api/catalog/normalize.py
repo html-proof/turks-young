@@ -116,33 +116,85 @@ def _normalize_artists_list(item: dict[str, Any]) -> list[dict[str, Any]]:
     raw_artist = item.get("artist")
     raw_ids = item.get("artist_seokeys") or item.get("artist_ids")
 
+    # Extract authentic original artist portraits if available in item
+    artist_img_map: dict[str, str] = {}
+    details = item.get("artist_detail")
+    if isinstance(details, list):
+        for d in details:
+            if isinstance(d, dict):
+                dname, did = _clean_artist_entry(d)
+                dimg = _upgrade_image_quality(
+                    d.get("atw") or d.get("artwork_large") or d.get("artwork_175x175")
+                    or d.get("artwork") or d.get("image_url") or d.get("imageUrl") or d.get("image")
+                )
+                if dimg:
+                    if dname:
+                        artist_img_map[dname.lower()] = dimg
+                    if did:
+                        artist_img_map[did.lower()] = dimg
+    if isinstance(raw_artist, list):
+        for a in raw_artist:
+            if isinstance(a, dict):
+                aname, aid = _clean_artist_entry(a)
+                aimg = _upgrade_image_quality(
+                    a.get("atw") or a.get("artwork_large") or a.get("artwork_175x175")
+                    or a.get("artwork") or a.get("image_url") or a.get("imageUrl") or a.get("image")
+                )
+                if aimg:
+                    if aname and aname.lower() not in artist_img_map:
+                        artist_img_map[aname.lower()] = aimg
+                    if aid and aid.lower() not in artist_img_map:
+                        artist_img_map[aid.lower()] = aimg
+
+    primary_artist_img = _upgrade_image_quality(item.get("artist_image"))
+
     # If artists is already a list of dicts:
     if isinstance(raw_artists, list) and any(isinstance(x, dict) for x in raw_artists):
         clean_list: list[dict[str, Any]] = []
-        for a in raw_artists:
+        for index, a in enumerate(raw_artists):
             if isinstance(a, dict):
                 clean_name, clean_id = _clean_artist_entry(a)
                 if not clean_id and clean_name:
                     clean_id = _slugify_artist_name(clean_name)
-                clean_image = a.get("image_url") or a.get("imageUrl") or a.get("image") or ""
+                clean_image = a.get("image_url") or a.get("imageUrl") or a.get("image") or a.get("atw") or ""
                 if isinstance(clean_image, dict):
                     clean_image = clean_image.get("large") or clean_image.get("medium") or ""
+                clean_img_str = _upgrade_image_quality(str(clean_image)) if clean_image else ""
+                if not clean_img_str:
+                    clean_img_str = (
+                        artist_img_map.get(clean_id.lower())
+                        or artist_img_map.get(clean_name.lower())
+                        or (primary_artist_img if index == 0 else "")
+                    )
                 record = {
                     "id": clean_id,
                     "name": clean_name,
                     "type": "artist",
                 }
-                if clean_image:
-                    record["image_url"] = _upgrade_image_quality(str(clean_image))
+                if clean_img_str:
+                    record["image_url"] = clean_img_str
+                    record["imageUrl"] = clean_img_str
+                    record["image_status"] = "verified"
                 clean_list.append(record)
             elif isinstance(a, str):
                 cn, cid = _clean_artist_entry(a)
                 if cn:
-                    clean_list.append({
-                        "id": cid or _slugify_artist_name(cn),
+                    clean_id = cid or _slugify_artist_name(cn)
+                    clean_img_str = (
+                        artist_img_map.get(clean_id.lower())
+                        or artist_img_map.get(cn.lower())
+                        or (primary_artist_img if index == 0 else "")
+                    )
+                    rec = {
+                        "id": clean_id,
                         "name": cn,
                         "type": "artist",
-                    })
+                    }
+                    if clean_img_str:
+                        rec["image_url"] = clean_img_str
+                        rec["imageUrl"] = clean_img_str
+                        rec["image_status"] = "verified"
+                    clean_list.append(rec)
         if clean_list:
             return clean_list
 
@@ -172,11 +224,26 @@ def _normalize_artists_list(item: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(raw_artist, dict):
             cn, cid = _clean_artist_entry(raw_artist)
             if cn:
-                return [{
-                    "id": cid or _slugify_artist_name(cn),
+                clean_id = cid or _slugify_artist_name(cn)
+                clean_img_str = (
+                    _upgrade_image_quality(
+                        raw_artist.get("atw") or raw_artist.get("artwork_large")
+                        or raw_artist.get("image_url") or raw_artist.get("imageUrl")
+                    )
+                    or artist_img_map.get(clean_id.lower())
+                    or artist_img_map.get(cn.lower())
+                    or primary_artist_img
+                )
+                rec = {
+                    "id": clean_id,
                     "name": cn,
                     "type": "artist",
-                }]
+                }
+                if clean_img_str:
+                    rec["image_url"] = clean_img_str
+                    rec["imageUrl"] = clean_img_str
+                    rec["image_status"] = "verified"
+                return [rec]
         elif isinstance(raw_artist, str) and raw_artist.strip():
             s = raw_artist.strip()
             if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
@@ -211,11 +278,21 @@ def _normalize_artists_list(item: dict[str, Any]) -> list[dict[str, Any]]:
             artist_id = inline_ids[index]
         else:
             artist_id = _slugify_artist_name(name)
-        result.append({
+        clean_img_str = (
+            artist_img_map.get(artist_id.lower())
+            or artist_img_map.get(name.lower())
+            or (primary_artist_img if index == 0 else "")
+        )
+        record = {
             "id": artist_id,
             "name": name,
             "type": "artist",
-        })
+        }
+        if clean_img_str:
+            record["image_url"] = clean_img_str
+            record["imageUrl"] = clean_img_str
+            record["image_status"] = "verified"
+        result.append(record)
     return result
 
 
@@ -322,6 +399,7 @@ def artist(item: dict[str, Any]) -> dict[str, Any]:
     clean_id = _clean_artist_id(raw_id) or (_slugify_artist_name(clean_name) if clean_name else "")
     return {
         "id": clean_id,
+        "seokey": clean_id,
         "provider_id": str(item.get("artist_id") or item.get("provider_id") or ""),
         "type": "artist",
         "name": clean_name,
@@ -357,6 +435,9 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         or streams.get("very_high_quality") or streams.get("low_quality")
         or direct_stream or None
     )
+    artist_image_url = _upgrade_image_quality(item.get("artist_image"))
+    if not artist_image_url and artists and artists[0].get("image_url"):
+        artist_image_url = artists[0]["image_url"]
     meta_conf = compute_metadata_confidence(
         title=title_str,
         artists=artists,
@@ -372,6 +453,8 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         "title": title_str,
         "artist": artists[0] if artists else None,
         "artists": artists,
+        "artist_image": artist_image_url or None,
+        "artistImage": artist_image_url or None,
         "album": {
             "id": album_id,
             "provider_id": str(item.get("album_id") or ""),

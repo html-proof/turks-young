@@ -247,6 +247,34 @@ class CatalogService:
         cache_id = artist_id or normalize_query(name)
 
         async def load():
+            # 1. Database check (curated, verified original portraits)
+            pool = getattr(self, "db_pool", None)
+            if pool:
+                try:
+                    async with pool.acquire() as conn:
+                        row = await conn.fetchrow(
+                            """
+                            SELECT id, name, image_url
+                            FROM artists
+                            WHERE (id = $1 AND id != '')
+                               OR (lower(name) = lower($2) AND name != '')
+                            LIMIT 1;
+                            """,
+                            artist_id, name,
+                        )
+                        if row and row["image_url"]:
+                            return {
+                                "id": row["id"],
+                                "name": row["name"],
+                                "image_url": row["image_url"],
+                                "imageUrl": row["image_url"],
+                                "image_status": "verified",
+                                "source": "database",
+                            }
+                except Exception as exc:
+                    logger.debug("db artist portrait lookup failed: %s", exc)
+
+            # 2. Gaana catalog get_artist_info
             if artist_id:
                 try:
                     details = await self.catalog.get_artist_info([artist_id], False)
@@ -258,6 +286,8 @@ class CatalogService:
                                     return normalized
                 except Exception as exc:
                     logger.warning("artist image detail failed id=%s error=%s", artist_id, exc)
+
+            # 3. Gaana catalog search_artists
             if name:
                 try:
                     results = items(_clean(await self.catalog.search_artists(name, 5)), "artist")
@@ -272,45 +302,7 @@ class CatalogService:
                 except Exception as exc:
                     logger.warning("artist image search failed name=%s error=%s", name, exc)
 
-                # 3. Internet photo search via Deezer API
-                try:
-                    import urllib.parse
-                    clean_name = urllib.parse.quote(name)
-                    if hasattr(self.catalog, "aiohttp") and self.catalog.aiohttp:
-                        async with self.catalog.aiohttp.get(
-                            f"https://api.deezer.com/search/artist?q={clean_name}&limit=1",
-                            timeout=4,
-                        ) as resp:
-                            if resp.status == 200:
-                                d_data = await resp.json(content_type=None)
-                                if d_data.get("data"):
-                                    first_d = d_data["data"][0]
-                                    pic = first_d.get("picture_xl") or first_d.get("picture_big") or first_d.get("picture_medium")
-                                    if pic and "artist-default" not in pic:
-                                        return {"image_url": pic, "imageUrl": pic, "image_status": "verified"}
-                except Exception as exc:
-                    logger.warning("deezer artist photo failed name=%s error=%s", name, exc)
-
-                # 4. Internet photo search via Wikipedia API
-                try:
-                    import urllib.parse
-                    wiki_q = urllib.parse.quote(f"{name} singer musician")
-                    if hasattr(self.catalog, "aiohttp") and self.catalog.aiohttp:
-                        async with self.catalog.aiohttp.get(
-                            f"https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch={wiki_q}&gsrlimit=1&prop=pageimages&piprop=thumbnail|original&pithumbsize=500&format=json",
-                            headers={"User-Agent": "MusicHub/1.0"},
-                            timeout=4,
-                        ) as resp:
-                            if resp.status == 200:
-                                w_data = await resp.json(content_type=None)
-                                pages = w_data.get("query", {}).get("pages", {})
-                                for pid, p in pages.items():
-                                    pic = (p.get("original") or {}).get("source") or (p.get("thumbnail") or {}).get("source")
-                                    if pic:
-                                        return {"image_url": pic, "imageUrl": pic, "image_status": "verified"}
-                except Exception as exc:
-                    logger.warning("wikipedia artist photo failed name=%s error=%s", name, exc)
-
+            # Never use unverified external web scrapers (Deezer/Wikipedia) that return wrong persons
             return {}
 
         resolved = await self._cached(
@@ -735,12 +727,61 @@ class CatalogService:
                     except Exception:
                         pass
 
+            pool = getattr(self, "db_pool", None)
+            if not isinstance(result, list) or not result:
+                if pool:
+                    try:
+                        async with pool.acquire() as conn:
+                            db_row = await conn.fetchrow(
+                                """
+                                SELECT id, name, image_url
+                                FROM artists
+                                WHERE (id = $1 AND id != '')
+                                   OR (lower(name) = lower($2) AND name != '')
+                                LIMIT 1;
+                                """,
+                                artist_id, artist_id.replace('-', ' '),
+                            )
+                            if db_row:
+                                raw = {
+                                    "id": db_row["id"],
+                                    "seokey": db_row["id"],
+                                    "name": db_row["name"],
+                                    "image_url": db_row["image_url"] or "",
+                                    "imageUrl": db_row["image_url"] or "",
+                                    "top_tracks": [],
+                                }
+                                result = [raw]
+                    except Exception as exc:
+                        logger.debug("artist_details db fallback failed: %s", exc)
+
             if not isinstance(result, list) or not result:
                 return None
             raw = result[0]
             normalized_artist = artist(raw)
             if not normalized_artist["id"] or not normalized_artist["name"]:
                 return None
+
+            if pool and (not normalized_artist.get("image_url") or normalized_artist.get("image_status") == "placeholder"):
+                try:
+                    async with pool.acquire() as conn:
+                        db_row = await conn.fetchrow(
+                            """
+                            SELECT image_url
+                            FROM artists
+                            WHERE (id = $1 AND id != '')
+                               OR (lower(name) = lower($2) AND name != '')
+                            LIMIT 1;
+                            """,
+                            normalized_artist.get("id") or artist_id,
+                            normalized_artist.get("name") or "",
+                        )
+                        if db_row and db_row["image_url"]:
+                            normalized_artist["image_url"] = db_row["image_url"]
+                            normalized_artist["imageUrl"] = db_row["image_url"]
+                            normalized_artist["image_status"] = "verified"
+                except Exception as exc:
+                    logger.debug("artist_details db image hydration failed: %s", exc)
 
             artist_name = normalized_artist.get("name") or artist_id
             album_list = []

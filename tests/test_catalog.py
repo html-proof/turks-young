@@ -695,3 +695,32 @@ def test_artist_normalization_idempotence_and_stringified_dict_recovery():
     assert norm3["artists"][1]["id"] == "pritam"
 
 
+def test_artist_portrait_extraction_from_artist_detail():
+    raw_song = {
+        "id": "arabic-kuthu",
+        "title": "Arabic Kuthu",
+        "artist_image": "https://a10.gaanacdn.com/gn_img/artists/a7LWBaz3zX/7LWB0AOKzX/size_m_1716892617.webp",
+        "artist_detail": [
+            {
+                "artist_id": "54397",
+                "seokey": "anirudh-ravichander",
+                "name": "Anirudh Ravichander",
+                "atw": "https://a10.gaanacdn.com/gn_img/artists/a7LWBaz3zX/7LWB0AOKzX/size_m_1716892617.webp",
+            },
+            {
+                "artist_id": "171956",
+                "seokey": "jonita-gandhi",
+                "name": "Jonita Gandhi",
+                "atw": "https://a10.gaanacdn.com/gn_img/artists/BZgWoQOK2d/ZgWozE4m32/size_m_1720782848.webp",
+            },
+        ],
+        "artists": "Anirudh Ravichander, Jonita Gandhi",
+    }
+    norm = song(raw_song)
+    assert norm["artist_image"] == "https://a10.gaanacdn.com/gn_img/artists/a7LWBaz3zX/7LWB0AOKzX/size_l_1716892617.webp"
+    assert len(norm["artists"]) == 2
+    assert norm["artists"][0]["image_url"] == "https://a10.gaanacdn.com/gn_img/artists/a7LWBaz3zX/7LWB0AOKzX/size_l_1716892617.webp"
+    assert norm["artists"][1]["image_url"] == "https://a10.gaanacdn.com/gn_img/artists/BZgWoQOK2d/ZgWozE4m32/size_l_1720782848.webp"
+    assert norm["artist"]["image_url"] == norm["artists"][0]["image_url"]
+
+
