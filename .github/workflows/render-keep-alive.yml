@@ -1,9 +1,14 @@
 name: Keep Render Service Awake
 
 on:
+  # 1. Scheduled cron trigger: runs every 10 minutes (Render sleep threshold is 15 min)
   schedule:
-    # Runs every 10 minutes to prevent Render free instance from spinning down (sleep threshold is 15 min)
     - cron: '*/10 * * * *'
+  # 2. Git push trigger: runs whenever any commit is pushed to main
+  push:
+    branches:
+      - main
+  # 3. Manual dispatch trigger: allows manual trigger from GitHub Actions dashboard
   workflow_dispatch:
     inputs:
       service_url:
@@ -13,65 +18,68 @@ on:
 
 jobs:
   ping-render:
-    name: Ping Render Web Service
+    name: Keep Alive Ping
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Send Keep-Alive Ping
+      - name: Send Keep-Alive Pings
         env:
           CUSTOM_URL: ${{ github.event.inputs.service_url }}
           SECRET_URL: ${{ secrets.RENDER_SERVICE_URL }}
           VAR_URL: ${{ vars.RENDER_SERVICE_URL }}
           DEFAULT_URL: "https://turks-young.onrender.com"
         run: |
-          # Determine target URL priority: manual input > secret > variable > default
           TARGET_URL="${CUSTOM_URL:-${SECRET_URL:-${VAR_URL:-$DEFAULT_URL}}}"
-          
-          # Strip trailing slash if present
           TARGET_URL="${TARGET_URL%/}"
           
           echo "====================================================="
-          echo "  Render Keep-Alive Ping Trigger"
+          echo "  Render Keep-Alive Git & Cron Trigger"
           echo "  Timestamp : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "  Target    : ${TARGET_URL}"
+          echo "  Trigger   : ${{ github.event_name }}"
           echo "====================================================="
           
-          # Health check endpoint ping
+          # 1. Ping /health (wakes up web server & FastAPI application)
           HEALTH_URL="${TARGET_URL}/health"
           echo "Pinging ${HEALTH_URL}..."
-          
-          # Perform curl with retries and generous timeout in case of cold start
-          HTTP_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}\nTIME_TOTAL:%{time_total}s\n" \
-            --connect-timeout 20 \
+          HEALTH_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}\nTIME_TOTAL:%{time_total}s\n" \
+            --connect-timeout 25 \
             --max-time 60 \
             --retry 3 \
             --retry-delay 5 \
-            -A "GitHub-Actions-Render-KeepAlive/1.0" \
+            -A "GitHub-Actions-Render-KeepAlive/2.0" \
             "${HEALTH_URL}")
           
-          STATUS_CODE=$(echo "$HTTP_RESPONSE" | grep "HTTP_STATUS" | cut -d':' -f2)
-          TIME_TAKEN=$(echo "$HTTP_RESPONSE" | grep "TIME_TOTAL" | cut -d':' -f2)
-          BODY=$(echo "$HTTP_RESPONSE" | grep -v "HTTP_STATUS" | grep -v "TIME_TOTAL")
+          H_STATUS=$(echo "$HEALTH_RESP" | grep "HTTP_STATUS" | cut -d':' -f2)
+          H_TIME=$(echo "$HEALTH_RESP" | grep "TIME_TOTAL" | cut -d':' -f2)
+          echo "-> /health status: ${H_STATUS} (${H_TIME})"
           
-          echo "Response Body : $BODY"
-          echo "HTTP Status   : $STATUS_CODE"
-          echo "Response Time : $TIME_TAKEN"
+          # 2. Ping /health/db (keeps Supabase PgBouncer connection pool warm & active)
+          DB_URL="${TARGET_URL}/health/db"
+          echo "Pinging ${DB_URL}..."
+          DB_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}\nTIME_TOTAL:%{time_total}s\n" \
+            --connect-timeout 25 \
+            --max-time 60 \
+            --retry 2 \
+            --retry-delay 3 \
+            -A "GitHub-Actions-Render-KeepAlive/2.0" \
+            "${DB_URL}")
           
-          if [ "$STATUS_CODE" -ge 200 ] && [ "$STATUS_CODE" -lt 400 ]; then
-            echo "✅ Keep-alive ping successful! Render service is awake and active."
+          DB_STATUS=$(echo "$DB_RESP" | grep "HTTP_STATUS" | cut -d':' -f2)
+          DB_TIME=$(echo "$DB_RESP" | grep "TIME_TOTAL" | cut -d':' -f2)
+          echo "-> /health/db status: ${DB_STATUS} (${DB_TIME})"
+          
+          # Evaluate overall health
+          if [ "$H_STATUS" -ge 200 ] && [ "$H_STATUS" -lt 400 ]; then
+            echo "✅ Keep-alive ping succeeded! Render instance is fully awake and active."
           else
-            echo "⚠️ Received HTTP status $STATUS_CODE. Attempting root endpoint ping..."
-            ROOT_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}\n" \
-              --connect-timeout 20 \
-              --max-time 60 \
-              -A "GitHub-Actions-Render-KeepAlive/1.0" \
-              "${TARGET_URL}/")
-            ROOT_STATUS=$(echo "$ROOT_RESPONSE" | grep "HTTP_STATUS" | cut -d':' -f2)
+            echo "⚠️ Main health ping returned $H_STATUS. Testing root fallback..."
+            ROOT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${TARGET_URL}/")
             if [ "$ROOT_STATUS" -ge 200 ] && [ "$ROOT_STATUS" -lt 400 ]; then
-              echo "✅ Root ping successful ($ROOT_STATUS). Service is awake."
+              echo "✅ Root ping succeeded with HTTP $ROOT_STATUS."
             else
-              echo "❌ Error: Service returned HTTP status $ROOT_STATUS."
+              echo "❌ Render service ping failed with HTTP $ROOT_STATUS"
               exit 1
             fi
           fi
