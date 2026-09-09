@@ -37,6 +37,7 @@ class RedisCache:
             logger.info("cache status=connected url=%s", self._url)
         except Exception as exc:
             self._available = False
+            self._client = None
             logger.warning("cache status=unavailable reason=%s", exc)
         return self._available
 
@@ -97,25 +98,29 @@ class RedisCache:
             logger.debug("cache set key=%s error=%s", key, exc)
 
     async def get_or_set(self, key: str, loader, ttl: int, stale_ttl: int | None = None) -> Any:
-        value, fresh = await self.get_with_stale(key)
-        if value is not None:
-            if not fresh:
-                logger.info("cache status=stale key=%s", key)
-                lock = self._locks.setdefault(key, asyncio.Lock())
-                if not lock.locked():
-                    asyncio.create_task(self._refresh(key, loader, ttl, stale_ttl, lock))
-            else:
-                logger.info("cache status=hit key=%s", key)
-            return value
-        logger.info("cache status=miss key=%s", key)
-        lock = self._locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            value, _ = await self.get_with_stale(key)
+        try:
+            value, fresh = await self.get_with_stale(key)
             if value is not None:
+                if not fresh:
+                    logger.info("cache status=stale key=%s", key)
+                    lock = self._locks.setdefault(key, asyncio.Lock())
+                    if not lock.locked():
+                        asyncio.create_task(self._refresh(key, loader, ttl, stale_ttl, lock))
+                else:
+                    logger.info("cache status=hit key=%s", key)
                 return value
-            value = await loader()
-            await self.set_with_stale(key, value, ttl, stale_ttl)
-            return value
+            logger.info("cache status=miss key=%s", key)
+            lock = self._locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                value, _ = await self.get_with_stale(key)
+                if value is not None:
+                    return value
+                value = await loader()
+                await self.set_with_stale(key, value, ttl, stale_ttl)
+                return value
+        except Exception as exc:
+            logger.warning("cache get_or_set fallback key=%s error=%s", key, exc)
+            return await loader()
 
     async def _refresh(self, key: str, loader, ttl: int, stale_ttl: int | None, lock: asyncio.Lock) -> None:
         async with lock:

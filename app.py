@@ -361,6 +361,34 @@ async def health_db(request: Request):
         )
 
 
+@app.get("/health/redis", tags=["ops"])
+@app.get("/api/health/redis", tags=["ops"])
+async def health_redis(request: Request):
+    cache = getattr(request.app.state, "cache", None)
+    has_url = bool(config.UPSTASH_REDIS_REST_URL)
+    has_token = bool(config.UPSTASH_REDIS_REST_TOKEN)
+    token_valid = (
+        config.UPSTASH_REDIS_REST_TOKEN != "<paste-your-token-in-render-ui>"
+        and len(config.UPSTASH_REDIS_REST_TOKEN) > 20
+    )
+    if not cache or not cache.available:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unavailable",
+                "has_url": has_url,
+                "has_token": has_token,
+                "token_is_valid_format": token_valid,
+                "error": "Redis cache is unavailable or UPSTASH_REDIS_REST_TOKEN is invalid/unset",
+            },
+        )
+    return {
+        "status": "connected",
+        "url": config.UPSTASH_REDIS_REST_URL,
+        "available": True,
+    }
+
+
 @app.api_route("/", methods=["GET", "HEAD"], tags=["ops"])
 async def home():
     return {"docs": "/docs", "github": "https://github.com/html-proof/turks-young"}
