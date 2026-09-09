@@ -510,6 +510,37 @@ class PostgresUserRepository:
                     )
         return {"accepted": True, "event_type": data["event_type"]}
 
+    async def record_search_impressions(self, uid: str, impressions: list[Any]) -> int:
+        """Persist only results the client reports as visible to the user."""
+        records = [item.model_dump(mode="json") for item in impressions]
+        if not records:
+            return 0
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO search_impressions "
+                "(user_id, query, session_id, result_id, result_type, position, algorithm_version) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                [
+                    (uid, item["query"], item["session_id"], item["result_id"],
+                     item["result_type"], item["position"], item["algorithm_version"])
+                    for item in records
+                ],
+            )
+        return len(records)
+
+    async def record_search_interaction(self, uid: str, interaction: Any) -> dict[str, Any]:
+        """Store an explicit relevance label without changing live ranking."""
+        item = interaction.model_dump(mode="json")
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO search_interactions "
+                "(user_id, query, session_id, result_id, result_type, position, action) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                uid, item["query"], item["session_id"], item["result_id"],
+                item["result_type"], item["position"], item["action"],
+            )
+        return {"accepted": True, "action": item["action"]}
+
     async def list_recently_played(self, uid: str, limit: int = 20) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -1020,7 +1051,7 @@ class PostgresUserRepository:
             )
         return [{"id": str(r["id"]), "type": r["type"], "title": r["title"],
                  "body": r["body"],
-                 "data": dict(r["data"]) if r["data"] else {},
+                 "data": json.loads(r["data"]) if isinstance(r["data"], str) else (dict(r["data"]) if r["data"] else {}),
                  "is_read": r["is_read"],
                  "created_at": r["created_at"].isoformat()} for r in rows]
 

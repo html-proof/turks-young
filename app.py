@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from firebase_admin import exceptions as firebase_exceptions
 
 from api.cache.redis_cache import RedisCache
+from api.catalog.labels import PostgresLabelRepository, label_registry
 from api.catalog.routes import router as catalog_router
 from api.catalog.service import CatalogService, LanguageCatalog
 from api.core import config
@@ -182,6 +183,9 @@ async def startup_event():
             repo = PostgresUserRepository(pool)
             app.state.user_repository = repo
             app.state.personalization_service = PersonalizedMusicService(repo)
+            label_repo = PostgresLabelRepository(pool)
+            label_registry.repository = label_repo
+            await label_registry.load_from_db()
             logger.info('"msg":"postgres connected"')
         except Exception as exc:
             logger.warning('"msg":"postgres unavailable","error":"%s"', exc)
@@ -197,6 +201,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    await label_registry.flush_pending_to_db()
     gaanapy: GaanaPy | None = app.state.gaanapy
     if gaanapy and hasattr(gaanapy, "aiohttp"):
         await gaanapy.aiohttp.close()

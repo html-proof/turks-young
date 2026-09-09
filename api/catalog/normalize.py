@@ -1,7 +1,33 @@
 import re
 from typing import Any
 
+from api.catalog.labels import is_verified_label, label_registry
 from api.lyrics.service import duration_seconds
+
+
+def compute_metadata_confidence(
+    title: str,
+    artists: list[Any],
+    album: Any,
+    duration_ms: int,
+    artwork_url: str | None,
+    stream_url: str | None,
+) -> float:
+    """Compute confidence (0.0 to 1.0) of song metadata completeness."""
+    score = 0.0
+    if title:
+        score += 0.25
+    if artists:
+        score += 0.20
+    if album:
+        score += 0.15
+    if duration_ms >= 30000:
+        score += 0.15
+    if artwork_url:
+        score += 0.15
+    if stream_url:
+        score += 0.10
+    return round(score, 2)
 
 
 def _upgrade_image_quality(url: str | None) -> str | None:
@@ -158,14 +184,31 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
     # Provider song records expose artist_image alongside the actual album
     # artwork. Prefer the track/album artwork fields so every song keeps its
     # own cover instead of inheriting an artist portrait.
+    label_registry.observe_song(item)
+    label_str = str(item.get("label") or "").strip()
+    is_official = is_verified_label(label_str) or bool(item.get("official_label_verified"))
+    title_str = str(item.get("title") or "")
     artwork_url = _song_artwork(item)
     album_id = str(item.get("album_seokey") or item.get("album_id") or "")
     album_title = str(item.get("album") or "")
+    stream_final = (
+        streams.get("high_quality") or streams.get("medium_quality")
+        or streams.get("very_high_quality") or streams.get("low_quality")
+        or direct_stream or None
+    )
+    meta_conf = compute_metadata_confidence(
+        title=title_str,
+        artists=artists,
+        album=album_title or album_id,
+        duration_ms=seconds * 1000,
+        artwork_url=artwork_url,
+        stream_url=stream_final,
+    )
     return {
         "id": str(item.get("seokey") or item.get("id") or ""),
         "provider_id": str(item.get("track_id") or item.get("provider_id") or ""),
         "type": "song",
-        "title": str(item.get("title") or ""),
+        "title": title_str,
         "artist": artists[0] if artists else None,
         "artists": artists,
         "album": {
@@ -181,20 +224,19 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         "duration_ms": seconds * 1000,
         "durationMs": seconds * 1000,
         "language": str(item.get("language") or ""),
-        "label": str(item.get("label") or ""),
+        "label": label_str,
+        "official_label_verified": is_official,
+        "metadata_confidence": meta_conf,
         "release_date": item.get("release_date") or None,
         "explicit": bool(item.get("is_explicit", False)),
-        "stream_url": (
-            streams.get("high_quality") or streams.get("medium_quality")
-            or streams.get("very_high_quality") or streams.get("low_quality")
-            or direct_stream or None
-        ),
+        "stream_url": stream_final,
         "stream_urls": item.get("stream_urls") or ({"urls": streams} if streams else None),
         "lyrics_url": f"/api/v1/tracks/{item.get('seokey')}/lyrics" if item.get("seokey") else None,
     }
 
 
 def album(item: dict[str, Any]) -> dict[str, Any]:
+    label_registry.observe_album(item)
     names = _csv(item.get("artists"))
     ids = _csv(item.get("artist_seokeys") or item.get("artist_ids"))
     title = str(item.get("title") or item.get("name") or "")

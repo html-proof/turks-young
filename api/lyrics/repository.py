@@ -51,9 +51,9 @@ class PostgresLyricsRepository:
                 """,
                 track_id,
                 data.get("provider", "lrclib"),
-                str(data["id"]) if data.get("id") is not None else None,
-                data.get("syncedLyrics"),
-                data.get("plainLyrics"),
+                data.get("provider_lyrics_id") or (str(data["id"]) if data.get("id") is not None else None),
+                data.get("syncedLyrics") or data.get("synced_lyrics"),
+                data.get("plainLyrics") or data.get("plain_lyrics"),
                 bool(data.get("instrumental")),
                 data.get("status", "available"),
             )

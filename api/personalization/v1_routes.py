@@ -4,7 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.auth import AuthenticatedUser, account_error, get_current_user
 from api.core.home_state import HOME_STALE, coalesce, invalidate_home
-from api.personalization.models import AlbumSnapshot, ArtistSnapshot, PreferenceIds, RecommendationEvent
+from api.personalization.models import (
+    AlbumSnapshot, ArtistSnapshot, PreferenceIds, RecommendationEvent,
+    SearchImpression, SearchInteraction,
+)
 from api.personalization.routes import get_personalization_service, get_user_repository
 
 router = APIRouter(prefix="/api/v1", tags=["Music Hub v1"])
@@ -162,6 +165,30 @@ async def events(event: RecommendationEvent, request: Request, user: Authenticat
     if cache and event.event_type in {"song_like", "song_unlike", "song_completed", "song_replay", "artist_follow", "album_save"}:
         invalidate_home(user.uid)
     return result
+
+
+@router.post("/search/impressions")
+async def search_impressions(
+    impressions: list[SearchImpression],
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository=Depends(get_user_repository),
+):
+    """Record visible ranked search results for offline relevance evaluation."""
+    if len(impressions) > 50:
+        raise HTTPException(422, "At most 50 search impressions can be recorded at once")
+    if not impressions:
+        raise HTTPException(422, "At least one search impression is required")
+    return {"accepted": await repository.record_search_impressions(user.uid, impressions)}
+
+
+@router.post("/search/interactions")
+async def search_interactions(
+    interaction: SearchInteraction,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository=Depends(get_user_repository),
+):
+    """Record a click, play, completion, skip, like, or save from search."""
+    return await repository.record_search_interaction(user.uid, interaction)
 
 
 @router.get("/me/recently-played")

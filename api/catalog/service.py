@@ -329,7 +329,7 @@ class CatalogService:
             requested = min(page * limit + 10, 100)
             async def load():
                 return _clean(await methods[kind](normalized_query, requested))
-            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v9", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+            result = await self._cached(f"music:search:{kind}:{normalized_query}:{requested}:v10", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
             normalized = rank(normalized_query, items(result, kind), kind, requested)
             # A movie search often has no movie name in the individual song
             # titles. Include the real soundtrack tracks when the query is an
@@ -445,7 +445,7 @@ class CatalogService:
                 [] if isinstance(r, Exception) or (isinstance(r, dict) and "error" in r) else r
                 for r in res
             ]
-        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v9", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+        results = await self._cached(f"music:search:all:{normalized_query}:{preview}:v10", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
         grouped: dict[str, list[dict[str, Any]]] = {}
         cursor = 0
         for result_kind in methods:
@@ -552,15 +552,46 @@ class CatalogService:
             grouped.get("songs", []),
             grouped.get("albums", []),
         )
-        if "albums" in grouped:
-            grouped["albums"] = grouped["albums"][:20]
+
         all_ranked = [(confidence(normalized_query, item, key[:-1]), key[:-1], item)
                       for key in ("artists", "songs", "albums", "playlists") for item in grouped[key]]
         top = None
         if all_ranked:
             top_confidence, top_kind, top_item = max(all_ranked, key=lambda value: value[0])
-            if top_confidence >= 0.55:
+            if top_confidence >= 0.50:
                 top = {"type": top_kind, "item": top_item, "confidence": round(top_confidence, 3)}
+
+        # When Top Result is an Album/Movie (e.g. "Ghilli"), prioritize its soundtrack songs at the top of songs list
+        if top and top.get("type") == "album" and top.get("item"):
+            top_album_title = normalize_query(str(top["item"].get("title") or top["item"].get("name") or ""))
+            top_album_id = str(top["item"].get("id") or "")
+            album_tracks: list[dict[str, Any]] = []
+            other_tracks: list[dict[str, Any]] = []
+            for s in grouped.get("songs", []):
+                s_album_val = s.get("album")
+                s_album_title = ""
+                s_album_id = ""
+                if isinstance(s_album_val, dict):
+                    s_album_title = normalize_query(str(s_album_val.get("title") or s_album_val.get("name") or ""))
+                    s_album_id = str(s_album_val.get("id") or "")
+                elif isinstance(s_album_val, str):
+                    s_album_title = normalize_query(s_album_val)
+                if (top_album_title and s_album_title == top_album_title) or (top_album_id and s_album_id == top_album_id):
+                    album_tracks.append(s)
+                else:
+                    other_tracks.append(s)
+            grouped["songs"] = album_tracks + other_tracks
+
+        # Spotify-style response grouping limits: Top 1, Songs 15, Albums 6, Artists 6, Playlists 6
+        if "songs" in grouped:
+            grouped["songs"] = grouped["songs"][:15]
+        if "albums" in grouped:
+            grouped["albums"] = grouped["albums"][:6]
+        if "artists" in grouped:
+            grouped["artists"] = grouped["artists"][:6]
+        if "playlists" in grouped:
+            grouped["playlists"] = grouped["playlists"][:6]
+
         return {"query": query, "normalized_query": normalized_query, "top_result": top, **grouped}
 
     async def discover(self, limit: int) -> list[dict[str, Any]]:

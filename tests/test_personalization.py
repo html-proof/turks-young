@@ -5,7 +5,9 @@ from typing import Any
 
 import pytest
 
-from api.personalization.models import ListeningEvent, TrackSnapshot
+from api.personalization.models import (
+    ListeningEvent, SearchImpression, SearchInteraction, TrackSnapshot,
+)
 from api.personalization.scorer import (
     apply_diversity,
     build_preference_scores,
@@ -15,6 +17,27 @@ from api.personalization.scorer import (
     score_track,
 )
 from api.personalization.service import PersonalizedMusicService
+
+
+def test_search_feedback_models_keep_query_position_and_action():
+    impression = SearchImpression(
+        query="Believer Imagine Dragons",
+        session_id="search-session-1",
+        result_id="believer",
+        result_type="song",
+        position=0,
+    )
+    interaction = SearchInteraction(
+        query="Believer Imagine Dragons",
+        session_id="search-session-1",
+        result_id="believer",
+        result_type="song",
+        position=0,
+        action="play",
+    )
+
+    assert impression.algorithm_version == "search_v1"
+    assert interaction.action == "play"
 
 
 # ---------------------------------------------------------------------------

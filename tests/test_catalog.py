@@ -165,7 +165,196 @@ def test_search_prefers_real_word_matches_over_fuzzy_neighbours():
     assert [item["id"] for item in results] == ["right"]
 
 
+def test_search_prefers_exact_title_and_artist_over_title_only_hit():
+    values = [
+        {"id": "cover", "type": "song", "title": "Believer", "artists": "Local Covers"},
+        {"id": "original", "type": "song", "title": "Believer", "artists": "Imagine Dragons"},
+        {"id": "wrong-artist", "type": "song", "title": "Believer", "artists": "Rag'n'Bone Man"},
+    ]
+
+    results = rank("believer imagine dragons", values, "song", 10)
+
+    assert results[0]["id"] == "original"
+
+
+def test_search_title_and_artist_match_outranks_a_longer_title_match():
+    values = [
+        {"id": "title-only", "type": "song", "title": "Believer Imagine Dragons Lyrics", "artists": "Unofficial"},
+        {"id": "original", "type": "song", "title": "Believer", "artists": "Imagine Dragons"},
+    ]
+
+    results = rank("believer imagine dragons", values, "song", 10)
+
+    assert results[0]["id"] == "original"
+
+
+def test_exact_song_search_does_not_include_broad_old_matches():
+    values = [
+        {"id": "exact", "type": "song", "title": "Believer", "artists": "Imagine Dragons"},
+        {"id": "old", "type": "song", "title": "Believer - Live Cover", "artists": "A Cover Band"},
+        {"id": "related", "type": "song", "title": "Believer Stories", "artists": "Another Artist"},
+    ]
+
+    results = rank("believer", values, "song", 10)
+
+    assert [item["id"] for item in results] == ["exact"]
+
+
 def test_movie_search_keeps_tamil_soundtrack_album_with_same_title():
+    values = [
+        {"id": "sarkar-hindi", "type": "album", "name": "Sarkar", "language": "Hindi"},
+        {"id": "sarkar-tamil", "type": "album", "name": "Sarkar (Tamil) (Original Motion Picture Soundtrack)", "language": "Tamil"},
+    ]
+
+    results = rank("sarkar", values, "album", 10)
+
+    assert {item["id"] for item in results} == {"sarkar-hindi", "sarkar-tamil"}
+
+
+def test_provider_search_accepts_new_result_envelope_and_encodes_query():
+    assert encoded_query("Jilla songs") == "Jilla%20songs"
+    assert search_entries({"data": {"results": [{"seokey": "jilla-song"}]}}) == [
+        {"seokey": "jilla-song"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_all_search_results_are_categorized():
+    catalog = FakeCatalog()
+    service = CatalogService(catalog, configured_languages())
+
+    result = await service.search("one", None, 1, 20)
+
+    assert result["top_result"]["type"] == "artist"
+    assert result["artists"][0]["type"] == "artist"
+    assert result["songs"][0]["type"] == "song"
+    assert result["albums"][0]["type"] == "album"
+    assert result["playlists"][0]["type"] == "playlist"
+
+
+@pytest.mark.asyncio
+async def test_filtered_search_has_pagination_contract():
+    catalog = FakeCatalog()
+    service = CatalogService(catalog, configured_languages())
+
+    result = await service.search("one", "song", 1, 20)
+
+    assert result == {
+        "items": [result["items"][0]],
+        "page": 1,
+        "limit": 20,
+        "has_more": False,
+        "type": "song",
+    }
+
+
+@pytest.mark.asyncio
+async def test_artist_onboarding_uses_configured_language_and_provider_image():
+    catalog = FakeCatalog()
+    service = CatalogService(catalog, configured_languages())
+
+    values = await service.artists_for_languages(["language-one"], 10)
+
+    catalog.search_artists.assert_awaited_once_with("Language One", 11)
+    assert values[0]["id"] == "artist-one"
+    assert values[0]["image_url"] == "https://images.test/artist.jpg"
+
+
+@pytest.mark.asyncio
+async def test_artist_onboarding_resolves_images_for_song_only_artists():
+    catalog = FakeCatalog()
+    catalog.search_artists = AsyncMock(return_value=[])
+    catalog.get_trending = AsyncMock(return_value=[{
+        "seokey": "track-one", "title": "Track One", "artists": "Artist From Song",
+        "artist_seokeys": "artist-from-song",
+    }])
+    service = CatalogService(catalog, configured_languages())
+
+    values = await service.artists_for_languages(["language-one"], 10)
+
+    assert values[0]["id"] == "artist-from-song"
+    assert values[0]["imageUrl"] == "https://images.test/resolved.jpg"
+    catalog.get_artist_info.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discovery_reads_nested_new_release_albums():
+    catalog = FakeCatalog()
+    service = CatalogService(catalog, configured_languages())
+
+    sections = await service.discover(10)
+
+    releases = next(section for section in sections if section["id"] == "new_releases")
+    assert releases["items"][0]["id"] == "new-album"
+
+
+@pytest.mark.asyncio
+async def test_artist_languages_are_fetched_concurrently_and_cached_per_language():
+    languages = LanguageCatalog.from_json(json.dumps([
+        {"id": name.lower(), "name": name, "native_name": name}
+        for name in ("Hindi", "Tamil", "Malayalam", "English")
+    ]))
+
+    class SlowCatalog(FakeCatalog):
+        def __init__(self):
+            super().__init__()
+            for attr in ("get_trending", "search_artists", "search_songs"):
+                delattr(self, attr)
+            self.calls = 0
+
+        async def get_trending(self, language, limit):
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return []
+
+        async def search_artists(self, query, limit):
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return [{"seokey": f"{query.lower()}-artist", "name": query}]
+
+        async def search_songs(self, query, limit):
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return []
+
+    catalog = SlowCatalog()
+    cache = RedisCache("", "")
+    service = CatalogService(catalog, languages, cache)
+    started = time.perf_counter()
+    first = await service.artists_for_languages(["hindi", "tamil", "malayalam", "english"], 10)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.25  # four language groups run in parallel, not 4 x 150 ms
+    assert len(first) == 4
+    assert catalog.calls == 12
+
+    await service.artists_for_languages(["hindi", "tamil", "malayalam", "english"], 10)
+    assert catalog.calls == 12
+
+
+@pytest.mark.asyncio
+async def test_cache_coalesces_concurrent_misses():
+    cache = RedisCache("", "")
+    calls = 0
+
+    async def loader():
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)
+        return {"ok": True}
+
+    values = await asyncio.gather(*[
+        cache.get_or_set("same-key", loader, 60) for _ in range(20)
+    ])
+    assert calls == 1
+    assert all(value == {"ok": True} for value in values)
+
+
+@pytest.mark.asyncio
+async def test_home_page_filters_typed_content_and_paginates():
+    service = CatalogService(FakeCatalog(), configured_languages())
+    repository = FakeHomeRepository()
+    recommendations = FakeRecommendations()
+
     values = [
         {"id": "sarkar-hindi", "type": "album", "name": "Sarkar", "language": "Hindi"},
         {"id": "sarkar-tamil", "type": "album", "name": "Sarkar (Tamil) (Original Motion Picture Soundtrack)", "language": "Tamil"},
@@ -329,3 +518,84 @@ async def test_home_page_filters_typed_content_and_paginates():
     assert all(item["type"] == "song" for section in songs["sections"] for item in section["items"])
     assert songs["has_more"] is True
     assert songs["next_cursor"] == "1"
+
+
+def test_ranking_ghilli_movie_and_songs_dominate_results():
+    values = [
+        {"id": "ghilli-album-song", "type": "song", "title": "Appadi Podu", "album": "Ghilli", "artists": "KK, Anuradha Sriram"},
+        {"id": "unrelated-pop-song", "type": "song", "title": "Vaathi Coming", "album": "Master", "artists": "Anirudh", "popularity": 1.0},
+        {"id": "ghilli-title-song", "type": "song", "title": "Ghilli Theme", "album": "Ghilli", "artists": "Vidyasagar"},
+        {"id": "ghilli-exact-song", "type": "song", "title": "Ghilli", "album": "Ghilli", "artists": "Vidyasagar"},
+    ]
+    results = rank("Ghilli", values, "song", 10)
+    # The exact song title "Ghilli" must be first
+    assert results[0]["id"] == "ghilli-exact-song"
+    # All Ghilli songs must rank above unrelated popular songs
+    ghilli_ids = {"ghilli-album-song", "ghilli-title-song", "ghilli-exact-song"}
+    top_3_ids = {r["id"] for r in results[:3]}
+    assert ghilli_ids == top_3_ids
+
+
+def test_ranking_exact_song_appadi_podu_first():
+    values = [
+        {"id": "cover", "type": "song", "title": "Appadi Podu (Remix)", "artists": "DJ X"},
+        {"id": "exact", "type": "song", "title": "Appadi Podu", "album": "Ghilli", "artists": "KK, Anuradha Sriram"},
+        {"id": "related", "type": "song", "title": "Appadi Podu Short Version", "artists": "KK"},
+    ]
+    results = rank("Appadi Podu", values, "song", 10)
+    assert results[0]["id"] == "exact"
+
+
+def test_ranking_artist_plus_song_ar_rahman_vennilave():
+    values = [
+        {"id": "wrong-artist-song", "type": "song", "title": "Vennilave", "artists": "Hariharan, Deva", "album": "Other Movie"},
+        {"id": "ar-rahman-exact", "type": "song", "title": "Vennilave", "artists": "A.R. Rahman, Hariharan", "album": "Minsara Kanavu"},
+        {"id": "random-rahman", "type": "song", "title": "Urvasi Urvasi", "artists": "A.R. Rahman", "album": "Kadhalan"},
+    ]
+    results = rank("AR Rahman Vennilave", values, "song", 10)
+    assert results[0]["id"] == "ar-rahman-exact"
+
+
+def test_ranking_malayalam_intent_vs_partial_character_match():
+    values = [
+        {"id": "mal-song", "type": "song", "title": "Malayalam Super Hits", "language": "malayalam"},
+        {"id": "partial-match", "type": "song", "title": "Mala Mala", "language": "tamil", "popularity": 1.0},
+    ]
+    results = rank("Malayalam", values, "song", 10)
+    assert results[0]["id"] == "mal-song"
+
+
+def test_ranking_illuminati_exact_song_before_trending_songs():
+    values = [
+        {"id": "aavesham-other", "type": "song", "title": "Jaada", "album": "Aavesham", "artists": "Sushin Shyam", "popularity": 1.0},
+        {"id": "illuminati-exact", "type": "song", "title": "Illuminati", "album": "Aavesham", "artists": "Sushin Shyam, Dabzee", "popularity": 0.5},
+        {"id": "unrelated-viral", "type": "song", "title": "Tauba Tauba", "artists": "Karan Aujla", "popularity": 1.0},
+    ]
+    results = rank("illuminati", values, "song", 10)
+    assert results[0]["id"] == "illuminati-exact"
+
+
+def test_ranking_tier_a_beats_high_popularity_tier_c():
+    values = [
+        {"id": "tier-c-viral", "type": "song", "title": "Mega Viral Hit", "artists": "Famous Singer", "popularity": 1.0},
+        {"id": "tier-a-exact", "type": "song", "title": "Nee Singam Dhan", "artists": "A.R. Rahman", "popularity": 0.05},
+    ]
+    results = rank("Nee Singam Dhan", values, "song", 10)
+    assert results[0]["id"] == "tier-a-exact"
+
+
+def test_ranking_personalization_cannot_defeat_exact_intent():
+    # User normally prefers Malayalam, but explicitly searches for a Tamil song "Ghilli"
+    values = [
+        {"id": "tamil-exact", "type": "song", "title": "Ghilli", "language": "tamil", "artists": "Vidyasagar"},
+        {"id": "malayalam-unrelated", "type": "song", "title": "Ghilli Malayalam Dubbed", "language": "malayalam", "artists": "Other"},
+    ]
+    results = rank(
+        "Ghilli",
+        values,
+        "song",
+        10,
+        user_languages=["malayalam"],
+        previous_searches=["malayalam"],
+    )
+    assert results[0]["id"] == "tamil-exact"

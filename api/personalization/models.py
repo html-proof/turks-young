@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -298,3 +298,27 @@ class RecommendationEvent(BaseModel):
     context_id: str | None = Field(default=None, max_length=100)
     query: str | None = Field(default=None, max_length=200)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchImpression(BaseModel):
+    """One ranked result that was actually rendered for a catalog search."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    query: str = Field(min_length=1, max_length=200)
+    session_id: str = Field(min_length=1, max_length=100)
+    result_id: str = Field(min_length=1, max_length=200)
+    result_type: Literal["song", "artist", "album", "playlist"]
+    position: int = Field(ge=0, le=100)
+    algorithm_version: str = Field(default="search_v1", min_length=1, max_length=50)
+
+
+class SearchInteraction(BaseModel):
+    """A user action tied to a previously shown search result."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    query: str = Field(min_length=1, max_length=200)
+    session_id: str = Field(min_length=1, max_length=100)
+    result_id: str = Field(min_length=1, max_length=200)
+    result_type: Literal["song", "artist", "album", "playlist"]
+    position: int = Field(ge=0, le=100)
+    action: Literal["click", "play", "complete", "skip", "like", "save"]
