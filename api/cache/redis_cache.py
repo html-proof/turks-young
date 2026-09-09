@@ -10,6 +10,7 @@ keeps working without a cache layer.
 import json
 import logging
 import asyncio
+import inspect
 import time
 from typing import Any
 
@@ -97,6 +98,15 @@ class RedisCache:
         except Exception as exc:
             logger.debug("cache set key=%s error=%s", key, exc)
 
+    @staticmethod
+    async def _eval_loader(loader) -> Any:
+        if inspect.iscoroutinefunction(loader):
+            return await loader()
+        res = loader()
+        if asyncio.iscoroutine(res):
+            return await res
+        return res
+
     async def get_or_set(self, key: str, loader, ttl: int, stale_ttl: int | None = None) -> Any:
         try:
             value, fresh = await self.get_with_stale(key)
@@ -115,12 +125,12 @@ class RedisCache:
                 value, _ = await self.get_with_stale(key)
                 if value is not None:
                     return value
-                value = await loader()
+                value = await self._eval_loader(loader)
                 await self.set_with_stale(key, value, ttl, stale_ttl)
                 return value
         except Exception as exc:
             logger.warning("cache get_or_set fallback key=%s error=%s", key, exc)
-            return await loader()
+            return await self._eval_loader(loader)
 
     async def _refresh(self, key: str, loader, ttl: int, stale_ttl: int | None, lock: asyncio.Lock) -> None:
         async with lock:
@@ -128,7 +138,7 @@ class RedisCache:
                 value, fresh = await self.get_with_stale(key)
                 if value is not None and fresh:
                     return
-                value = await loader()
+                value = await self._eval_loader(loader)
                 await self.set_with_stale(key, value, ttl, stale_ttl)
             except Exception as exc:
                 logger.warning("cache refresh failed key=%s error=%s", key, exc)

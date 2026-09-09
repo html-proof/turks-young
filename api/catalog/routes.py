@@ -26,9 +26,11 @@ async def languages(request: Request, response: Response):
     service = _service(request)
     values = [value.model_dump(mode="json") for value in service.languages.languages]
     cache = getattr(request.app.state, "cache", None)
-    key = "music:languages:v1"
+    async def _get_langs():
+        return _language_payload(values)
+
     if cache and hasattr(cache, "get_or_set"):
-        data = await cache.get_or_set(key, lambda: _language_payload(values), config.TTL_LANGUAGES, config.STALE_CACHE_TTL)
+        data = await cache.get_or_set(key, _get_langs, config.TTL_LANGUAGES, config.STALE_CACHE_TTL)
     else:
         data = _language_payload(values)
     payload = envelope(data, count=len(data["items"]))
