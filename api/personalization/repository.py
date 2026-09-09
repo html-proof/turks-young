@@ -23,6 +23,7 @@ from api.personalization.models import (
     TrackSnapshot,
     UserPlaylistCreate,
     UserPlaylistUpdate,
+    clean_album_or_title,
 )
 
 
@@ -189,6 +190,10 @@ class PostgresUserRepository:
         for row in rows:
             item = json.loads(row["track"]) if isinstance(row["track"], str) else dict(row["track"])
             item["favorited_at"] = row["favorited_at"].isoformat()
+            if "album" in item:
+                item["album"] = clean_album_or_title(item["album"])
+            if "title" in item:
+                item["title"] = clean_album_or_title(item["title"])
             result.append(item)
         return result
 
@@ -253,6 +258,10 @@ class PostgresUserRepository:
             item = json.loads(row["event"]) if isinstance(row["event"], str) else dict(row["event"])
             item["event_id"] = str(row["id"])
             item["played_at"] = row["played_at"].isoformat()
+            if "album" in item:
+                item["album"] = clean_album_or_title(item["album"])
+            if "title" in item:
+                item["title"] = clean_album_or_title(item["title"])
             result.append(item)
         return result
 
@@ -800,7 +809,24 @@ class PostgresUserRepository:
                 "SELECT song_id,artist_id,album_id,started_at,position_ms,duration_ms,completion_percentage,source,context_id,metadata FROM playback_history WHERE user_id=$1 ORDER BY started_at DESC LIMIT $2",
                 uid, limit,
             )
-        return [dict(row) | {"started_at": row["started_at"].isoformat()} for row in rows]
+        out = []
+        for row in rows:
+            rec = dict(row)
+            rec["started_at"] = row["started_at"].isoformat()
+            md = rec.get("metadata")
+            if isinstance(md, str):
+                try:
+                    md = json.loads(md)
+                except Exception:
+                    md = {}
+            if isinstance(md, dict):
+                if "album" in md:
+                    md["album"] = clean_album_or_title(md["album"])
+                if "title" in md:
+                    md["title"] = clean_album_or_title(md["title"])
+                rec["metadata"] = md
+            out.append(rec)
+        return out
 
     async def set_song_like(self, uid: str, song_id: str, liked: bool, snapshot: dict[str, Any] | None = None) -> None:
         async with self._pool.acquire() as conn:
@@ -1407,6 +1433,10 @@ class PostgresUserRepository:
             item = row[column] if isinstance(row[column], dict) else json.loads(row[column])
             item = dict(item)
             item[timestamp] = row[timestamp].isoformat()
+            if "title" in item:
+                item["title"] = clean_album_or_title(item["title"])
+            if "album" in item:
+                item["album"] = clean_album_or_title(item["album"])
             result.append(item)
         return result
 

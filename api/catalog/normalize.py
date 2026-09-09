@@ -488,6 +488,54 @@ def artist(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def clean_album_or_title(val: Any) -> str:
+    if not val:
+        return ""
+    if isinstance(val, dict):
+        t = val.get("title") or val.get("name") or val.get("album") or ""
+        if t:
+            return clean_album_or_title(t)
+        slug = val.get("id") or val.get("seokey") or val.get("album_seokey") or ""
+        if slug:
+            return str(slug).replace("-", " ").title()
+        return ""
+    s = str(val).strip()
+    if not s:
+        return ""
+    if (s.startswith("{") and s.endswith("}")) or (
+        "'id':" in s or '"id":' in s or "'title':" in s or '"title":' in s or "'name':" in s or '"name":' in s
+    ):
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, dict):
+                t = parsed.get("title") or parsed.get("name") or parsed.get("album")
+                if t:
+                    return clean_album_or_title(t)
+                slug = parsed.get("id") or parsed.get("seokey") or parsed.get("album_seokey") or ""
+                if slug:
+                    return str(slug).replace("-", " ").title()
+        except Exception:
+            pass
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, dict):
+                t = parsed.get("title") or parsed.get("name") or parsed.get("album")
+                if t:
+                    return clean_album_or_title(t)
+                slug = parsed.get("id") or parsed.get("seokey") or parsed.get("album_seokey") or ""
+                if slug:
+                    return str(slug).replace("-", " ").title()
+        except Exception:
+            pass
+        m = re.search(r"""['"](?:title|name)['"]\s*:\s*['"]([^'"]+)['"]""", s)
+        if m and m.group(1).strip():
+            return clean_album_or_title(m.group(1).strip())
+        m_id = re.search(r"""['"](?:id|seokey|album_seokey)['"]\s*:\s*['"]([^'"]+)['"]""", s)
+        if m_id and m_id.group(1).strip():
+            return m_id.group(1).strip().replace("-", " ").title()
+    return s
+
+
 def song(item: dict[str, Any]) -> dict[str, Any]:
     artists = _normalize_artists_list(item)
     streams = (item.get("stream_urls") or {}).get("urls") or {}
@@ -502,10 +550,38 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
     label_registry.observe_song(item)
     label_str = str(item.get("label") or "").strip()
     is_official = is_verified_label(label_str) or bool(item.get("official_label_verified"))
-    title_str = str(item.get("title") or "")
+    raw_title = item.get("title") or item.get("name") or ""
+    title_str = clean_album_or_title(raw_title)
     artwork_url = _song_artwork(item)
+
+    raw_album = item.get("album")
     album_id = str(item.get("album_seokey") or item.get("album_id") or "")
-    album_title = str(item.get("album") or "")
+    provider_album_id = str(item.get("album_id") or "")
+    album_title = ""
+    if isinstance(raw_album, dict):
+        album_title = clean_album_or_title(raw_album.get("title") or raw_album.get("name") or "")
+        if not album_id:
+            album_id = str(raw_album.get("id") or raw_album.get("seokey") or raw_album.get("album_seokey") or "")
+        if not provider_album_id:
+            provider_album_id = str(raw_album.get("provider_id") or raw_album.get("album_id") or "")
+    elif isinstance(raw_album, str):
+        album_title = clean_album_or_title(raw_album)
+        if not album_id and (raw_album.strip().startswith("{") or "'id':" in raw_album or '"id":' in raw_album):
+            m_id = re.search(r"""['"](?:id|seokey|album_seokey)['"]\s*:\s*['"]([^'"]+)['"]""", raw_album)
+            if m_id:
+                album_id = m_id.group(1).strip()
+            m_pid = re.search(r"""['"](?:provider_id|album_id)['"]\s*:\s*['"]([^'"]+)['"]""", raw_album)
+            if m_pid:
+                provider_album_id = m_pid.group(1).strip()
+
+    if not album_title and album_id:
+        album_title = album_id.replace("-", " ").title()
+
+    if album_id and (album_id.strip().startswith("{") or "'id':" in album_id or '"id":' in album_id):
+        m_id = re.search(r"""['"](?:id|seokey|album_seokey)['"]\s*:\s*['"]([^'"]+)['"]""", album_id)
+        if m_id:
+            album_id = m_id.group(1).strip()
+
     stream_final = (
         streams.get("high_quality") or streams.get("medium_quality")
         or streams.get("very_high_quality") or streams.get("low_quality")
@@ -533,7 +609,7 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         "artistImage": artist_image_url or None,
         "album": {
             "id": album_id,
-            "provider_id": str(item.get("album_id") or ""),
+            "provider_id": provider_album_id,
             "name": album_title,
             "title": album_title,
             "artworkUrl": artwork_url,
@@ -560,7 +636,8 @@ def album(item: dict[str, Any]) -> dict[str, Any]:
     artist_values = _normalize_artists_list(item)
     names = [a["name"] for a in artist_values]
     ids = [a["id"] for a in artist_values]
-    title = str(item.get("title") or item.get("name") or "")
+    raw_title = item.get("title") or item.get("name") or ""
+    title = clean_album_or_title(raw_title)
     artwork_url = _image(item)
     release_date = item.get("release_date") or None
     release_year = None
@@ -570,8 +647,13 @@ def album(item: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             release_year = None
     track_count = _int(item.get("track_count") or item.get("song_count"))
+    raw_id = str(item.get("seokey") or item.get("id") or "")
+    if raw_id.strip().startswith("{") or "'id':" in raw_id or '"id":' in raw_id:
+        m_id = re.search(r"""['"](?:id|seokey|album_seokey)['"]\s*:\s*['"]([^'"]+)['"]""", raw_id)
+        if m_id:
+            raw_id = m_id.group(1).strip()
     data = {
-        "id": str(item.get("seokey") or item.get("id") or ""),
+        "id": raw_id,
         "provider_id": str(item.get("album_id") or item.get("provider_id") or ""),
         "type": "album",
         "name": title,
@@ -599,10 +681,15 @@ def album(item: dict[str, Any]) -> dict[str, Any]:
 def playlist(item: dict[str, Any]) -> dict[str, Any]:
     artwork = item.get("image_url") or _image(item)
     tracks = item.get("tracks") if isinstance(item.get("tracks"), list) else []
+    raw_id = str(item.get("seokey") or item.get("id") or "")
+    if raw_id.strip().startswith("{") or "'id':" in raw_id or '"id":' in raw_id:
+        m_id = re.search(r"""['"](?:id|seokey)['"]\s*:\s*['"]([^'"]+)['"]""", raw_id)
+        if m_id:
+            raw_id = m_id.group(1).strip()
     return {
-        "id": str(item.get("seokey") or item.get("id") or ""),
+        "id": raw_id,
         "type": "playlist",
-        "name": str(item.get("title") or item.get("name") or ""),
+        "name": clean_album_or_title(item.get("title") or item.get("name") or ""),
         "description": str(item.get("description") or ""),
         "owner": item.get("owner") or None,
         "image_url": artwork,

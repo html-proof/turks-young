@@ -43,6 +43,68 @@ def _clean_str_item(val: Any) -> str:
     return "" if _is_artist_noise(s) else s
 
 
+def clean_album_or_title(val: Any) -> str:
+    if not val:
+        return ""
+    if isinstance(val, dict):
+        t = val.get("title") or val.get("name") or val.get("album") or ""
+        if t:
+            return clean_album_or_title(t)
+        slug = val.get("id") or val.get("seokey") or val.get("album_seokey") or ""
+        if slug:
+            return str(slug).replace("-", " ").title()
+        return ""
+    s = str(val).strip()
+    if not s:
+        return ""
+    if (s.startswith("{") and s.endswith("}")) or (
+        "'id':" in s or '"id":' in s or "'title':" in s or '"title":' in s or "'name':" in s or '"name":' in s
+    ):
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, dict):
+                t = parsed.get("title") or parsed.get("name") or parsed.get("album")
+                if t:
+                    return clean_album_or_title(t)
+                slug = parsed.get("id") or parsed.get("seokey") or parsed.get("album_seokey") or ""
+                if slug:
+                    return str(slug).replace("-", " ").title()
+        except Exception:
+            pass
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, dict):
+                t = parsed.get("title") or parsed.get("name") or parsed.get("album")
+                if t:
+                    return clean_album_or_title(t)
+                slug = parsed.get("id") or parsed.get("seokey") or parsed.get("album_seokey") or ""
+                if slug:
+                    return str(slug).replace("-", " ").title()
+        except Exception:
+            pass
+        m = re.search(r"""['"](?:title|name)['"]\s*:\s*['"]([^'"]+)['"]""", s)
+        if m and m.group(1).strip():
+            return clean_album_or_title(m.group(1).strip())
+        m_id = re.search(r"""['"](?:id|seokey|album_seokey)['"]\s*:\s*['"]([^'"]+)['"]""", s)
+        if m_id and m_id.group(1).strip():
+            return m_id.group(1).strip().replace("-", " ").title()
+    s = re.sub(r"^[{}\[\]\'\"\s]+|[{}\[\]\'\"\s]+$", "", s).strip()
+    return s
+
+
+def _clean_id_slug(val: Any) -> str:
+    if not val:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("id") or val.get("seokey") or val.get("album_seokey") or val.get("album_id") or "").strip()
+    s = str(val).strip()
+    if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("id" in s or "seokey" in s):
+        m = re.search(r"""['"](?:id|seokey|album_seokey|album_id)['"]\s*:\s*['"]([^'"]+)['"]""", s)
+        if m:
+            return m.group(1).strip()
+    return s.strip("'\"{}[]")
+
+
 def _list_from_value(value: Any) -> list[str]:
     if value is None:
         return []
@@ -158,7 +220,17 @@ class TrackSnapshot(BaseModel):
         cleaned = re.sub(r"[^a-zA-Z0-9\-_./%\[\]()+@]", "-", normalized)
         return cleaned.strip("-") or "unknown"
 
-    @field_validator("track_id", "title", "language", "album", "album_id", "album_seokey", mode="before")
+    @field_validator("title", "album", mode="before")
+    @classmethod
+    def normalize_title_album(cls, value: Any) -> str:
+        return clean_album_or_title(value)
+
+    @field_validator("album_id", "album_seokey", mode="before")
+    @classmethod
+    def normalize_album_identifiers(cls, value: Any) -> str:
+        return _clean_id_slug(value)
+
+    @field_validator("track_id", "language", mode="before")
     @classmethod
     def normalize_strings(cls, value: Any) -> str:
         return "" if value is None else str(value).strip()
@@ -262,10 +334,15 @@ class AlbumSnapshot(BaseModel):
         cleaned = re.sub(r"[^a-zA-Z0-9\-_.%]", "-", normalized)
         return cleaned.strip("-") or "unknown"
 
-    @field_validator("album_id", "title", mode="before")
+    @field_validator("title", mode="before")
     @classmethod
-    def normalize_strings(cls, value: Any) -> str:
-        return "" if value is None else str(value).strip()
+    def normalize_title(cls, value: Any) -> str:
+        return clean_album_or_title(value)
+
+    @field_validator("album_id", mode="before")
+    @classmethod
+    def normalize_album_id(cls, value: Any) -> str:
+        return _clean_id_slug(value)
 
     @field_validator("images", mode="before")
     @classmethod
