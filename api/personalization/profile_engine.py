@@ -19,6 +19,7 @@ import math
 import re
 from typing import Any
 
+from api.catalog.normalize import _clean_artist_str
 from api.personalization.models import BehavioralEvent, ListeningEvent, UserTasteProfile
 
 logger = logging.getLogger(__name__)
@@ -216,9 +217,7 @@ class ProfileEngine:
             if lang:
                 long_term["languages"][lang] = long_term["languages"].get(lang, 0.0) + (8.0 * decay)
             for art in fav.get("artists") or [fav.get("artist")] or []:
-                if isinstance(art, dict):
-                    art = art.get("id") or art.get("name") or ""
-                art_str = str(art or "").lower().strip()
+                art_str = _clean_artist_str(art).lower().strip()
                 if art_str:
                     long_term["artists"][art_str] = long_term["artists"].get(art_str, 0.0) + (8.0 * decay)
             for g in fav.get("genres") or []:
@@ -294,9 +293,7 @@ class ProfileEngine:
                 if lang:
                     target_dict["languages"][lang] = target_dict["languages"].get(lang, 0.0) + (w * 0.8)
                 for a in artists:
-                    if isinstance(a, dict):
-                        a = a.get("id") or a.get("name") or ""
-                    a_str = str(a or "").lower().strip()
+                    a_str = _clean_artist_str(a).lower().strip()
                     if a_str:
                         target_dict["artists"][a_str] = target_dict["artists"].get(a_str, 0.0) + w
                 for g in genres:

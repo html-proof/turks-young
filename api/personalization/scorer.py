@@ -15,12 +15,37 @@ from typing import Any
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _clean_str(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("name") or val.get("title") or val.get("id") or val.get("seokey") or "").strip()
+    s = str(val).strip()
+    if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+        match = re.search(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
+        if match:
+            return match.group(1).strip()
+        match_id = re.search(r"['\"](?:id|seokey|artist_id)['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
+        if match_id:
+            return match_id.group(1).strip()
+    return s
+
+
 def _items(value: Any) -> list[str]:
     """Return a normalised list of non-empty strings from str, list, or None."""
     if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
+        s = value.strip()
+        if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+            c = _clean_str(s)
+            return [c] if c else []
+        return [item.strip() for item in s.split(",") if item.strip()]
     if isinstance(value, (list, tuple)):
-        return [str(v).strip() for v in value if str(v).strip()]
+        out = []
+        for v in value:
+            c = _clean_str(v)
+            if c:
+                out.append(c)
+        return out
     return []
 
 

@@ -8,20 +8,41 @@ import re
 SEO_KEY_PATTERN = r"^[a-zA-Z0-9\-_./%\[\]()+@]+$"
 
 
+def _clean_str_item(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("name") or val.get("title") or val.get("id") or val.get("seokey") or "").strip()
+    s = str(val).strip()
+    if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+        match = re.search(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
+        if match:
+            return match.group(1).strip()
+        match_id = re.search(r"['\"](?:id|seokey|artist_id)['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
+        if match_id:
+            return match_id.group(1).strip()
+    return s
+
+
 def _list_from_value(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
-        values = value.split(",")
+        s = value.strip()
+        if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+            c = _clean_str_item(s)
+            values = [c] if c else []
+        else:
+            values = s.split(",")
     elif isinstance(value, (list, tuple, set)):
-        values = value
+        values = list(value)
     else:
         values = [value]
 
     unique: list[str] = []
     seen: set[str] = set()
     for item in values:
-        normalized = str(item).strip()
+        normalized = _clean_str_item(item)
         key = normalized.casefold()
         if normalized and key not in seen:
             unique.append(normalized)

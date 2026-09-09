@@ -659,3 +659,39 @@ async def test_catalog_service_handles_db_failure_gracefully():
     res = await service.artist_page(["hindi"], 10)
     assert isinstance(res["items"], list)
 
+
+def test_artist_normalization_idempotence_and_stringified_dict_recovery():
+    # 1. Normalizing raw song
+    raw = {
+        "id": "ethir-neechal-14",
+        "title": "Ethir Neechal",
+        "artists": "Anirudh Ravichander, Yo Yo Honey Singh, Hiphop Tamizha",
+        "artist_seokeys": "anirudh-ravichander, yo-yo-honey-singh, hip-hop-tamizha",
+    }
+    norm1 = song(raw)
+    assert len(norm1["artists"]) == 3
+    assert norm1["artist"]["name"] == "Anirudh Ravichander"
+    assert norm1["artist"]["id"] == "anirudh-ravichander"
+    assert norm1["artists"][2]["name"] == "Hiphop Tamizha"
+    assert norm1["artists"][2]["id"] == "hip-hop-tamizha"
+
+    # 2. Idempotent: re-normalizing already normalized song
+    norm2 = song(norm1)
+    assert norm2["artist"]["name"] == "Anirudh Ravichander"
+    assert not norm2["artist"]["name"].startswith("{")
+    assert norm2["artists"][2]["name"] == "Hiphop Tamizha"
+    assert not norm2["artists"][2]["name"].startswith("{")
+
+    # 3. Corrupted stringified dictionaries recovery
+    corrupted = {
+        "id": "corrupted-1",
+        "title": "Corrupted Song",
+        "artists": ["{'id': 'hip-hop-tamizha', 'name': 'Hiphop Tamizha'}", "{'id': 'pritam', 'name': 'Pritam'}"],
+    }
+    norm3 = song(corrupted)
+    assert norm3["artist"]["name"] == "Hiphop Tamizha"
+    assert norm3["artist"]["id"] == "hip-hop-tamizha"
+    assert norm3["artists"][1]["name"] == "Pritam"
+    assert norm3["artists"][1]["id"] == "pritam"
+
+

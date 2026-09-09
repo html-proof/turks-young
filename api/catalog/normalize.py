@@ -63,10 +63,172 @@ def _upgrade_image_quality(url: str | None) -> str | None:
     return url
 
 
+def _clean_artist_str(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("name") or val.get("title") or val.get("id") or val.get("seokey") or "").strip()
+    s = str(val).strip()
+    if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+        match = re.search(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
+        if match:
+            return match.group(1).strip()
+        match_id = re.search(r"['\"](?:id|seokey|artist_id)['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
+        if match_id:
+            return match_id.group(1).strip()
+    return s
+
+
+def _clean_artist_id(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("id") or val.get("seokey") or val.get("artist_id") or "").strip()
+    s = str(val).strip()
+    if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("id" in s or "seokey" in s):
+        match = re.search(r"['\"](?:id|seokey|artist_id)['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
+        if match:
+            return match.group(1).strip()
+    return s
+
+
+def _clean_artist_entry(val: Any) -> tuple[str, str]:
+    if val is None:
+        return "", ""
+    if isinstance(val, dict):
+        name = _clean_artist_str(val.get("name") or val.get("title"))
+        aid = _clean_artist_id(val.get("id") or val.get("seokey") or val.get("artist_id"))
+        return name, aid
+    s = str(val).strip()
+    if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+        name = _clean_artist_str(s)
+        aid = _clean_artist_id(s)
+        return name, aid
+    return s, ""
+
+
+def _slugify_artist_name(name: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9]+', '-', str(name or '')).strip('-').lower()
+
+
+def _normalize_artists_list(item: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_artists = item.get("artists")
+    raw_artist = item.get("artist")
+    raw_ids = item.get("artist_seokeys") or item.get("artist_ids")
+
+    # If artists is already a list of dicts:
+    if isinstance(raw_artists, list) and any(isinstance(x, dict) for x in raw_artists):
+        clean_list: list[dict[str, Any]] = []
+        for a in raw_artists:
+            if isinstance(a, dict):
+                clean_name, clean_id = _clean_artist_entry(a)
+                if not clean_id and clean_name:
+                    clean_id = _slugify_artist_name(clean_name)
+                clean_image = a.get("image_url") or a.get("imageUrl") or a.get("image") or ""
+                if isinstance(clean_image, dict):
+                    clean_image = clean_image.get("large") or clean_image.get("medium") or ""
+                record = {
+                    "id": clean_id,
+                    "name": clean_name,
+                    "type": "artist",
+                }
+                if clean_image:
+                    record["image_url"] = _upgrade_image_quality(str(clean_image))
+                clean_list.append(record)
+            elif isinstance(a, str):
+                cn, cid = _clean_artist_entry(a)
+                if cn:
+                    clean_list.append({
+                        "id": cid or _slugify_artist_name(cn),
+                        "name": cn,
+                        "type": "artist",
+                    })
+        if clean_list:
+            return clean_list
+
+    names: list[str] = []
+    inline_ids: list[str] = []
+    if isinstance(raw_artists, list):
+        for x in raw_artists:
+            cn, cid = _clean_artist_entry(x)
+            if cn:
+                names.append(cn)
+                inline_ids.append(cid)
+    elif isinstance(raw_artists, str) and raw_artists.strip():
+        s = raw_artists.strip()
+        if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+            cn, cid = _clean_artist_entry(s)
+            if cn:
+                names.append(cn)
+                inline_ids.append(cid)
+        else:
+            for part in s.split(","):
+                cn = _clean_artist_str(part)
+                if cn:
+                    names.append(cn)
+                    inline_ids.append("")
+
+    if not names:
+        if isinstance(raw_artist, dict):
+            cn, cid = _clean_artist_entry(raw_artist)
+            if cn:
+                return [{
+                    "id": cid or _slugify_artist_name(cn),
+                    "name": cn,
+                    "type": "artist",
+                }]
+        elif isinstance(raw_artist, str) and raw_artist.strip():
+            s = raw_artist.strip()
+            if (s.startswith("{") or s.startswith("'") or s.startswith('"')) and ("name" in s or "id" in s):
+                cn, cid = _clean_artist_entry(s)
+                if cn:
+                    names.append(cn)
+                    inline_ids.append(cid)
+            else:
+                for part in s.split(","):
+                    cn = _clean_artist_str(part)
+                    if cn:
+                        names.append(cn)
+                        inline_ids.append("")
+
+    ids: list[str] = []
+    if isinstance(raw_ids, list):
+        for x in raw_ids:
+            cid = _clean_artist_id(x)
+            if cid:
+                ids.append(cid)
+    elif isinstance(raw_ids, str) and raw_ids.strip():
+        ids = [_clean_artist_id(x) for x in raw_ids.split(",") if _clean_artist_id(x)]
+
+    result: list[dict[str, Any]] = []
+    for index, name in enumerate(names):
+        if not name:
+            continue
+        artist_id = ""
+        if index < len(ids) and ids[index]:
+            artist_id = ids[index]
+        elif index < len(inline_ids) and inline_ids[index]:
+            artist_id = inline_ids[index]
+        else:
+            artist_id = _slugify_artist_name(name)
+        result.append({
+            "id": artist_id,
+            "name": name,
+            "type": "artist",
+        })
+    return result
+
+
 def _csv(value: Any) -> list[str]:
     if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+        out: list[str] = []
+        for item in value:
+            c = _clean_artist_str(item)
+            if c:
+                out.append(c)
+        return out
+    s = _clean_artist_str(value)
+    return [item.strip() for item in s.split(",") if item.strip()]
 
 
 def _image(item: dict[str, Any]) -> str | None:
@@ -154,11 +316,15 @@ def _int(value: Any) -> int:
 def artist(item: dict[str, Any]) -> dict[str, Any]:
     images = _images(item)
     image_url = _image(item) or images["large"] or images["medium"] or images["small"]
+    raw_name = item.get("name") or ""
+    clean_name = _clean_artist_str(raw_name)
+    raw_id = item.get("seokey") or item.get("id") or ""
+    clean_id = _clean_artist_id(raw_id) or (_slugify_artist_name(clean_name) if clean_name else "")
     return {
-        "id": str(item.get("seokey") or item.get("id") or ""),
+        "id": clean_id,
         "provider_id": str(item.get("artist_id") or item.get("provider_id") or ""),
         "type": "artist",
-        "name": str(item.get("name") or ""),
+        "name": clean_name,
         "image_url": image_url,
         "imageUrl": image_url,
         "image": {key: value for key, value in images.items() if value},
@@ -169,12 +335,7 @@ def artist(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def song(item: dict[str, Any]) -> dict[str, Any]:
-    names = _csv(item.get("artists"))
-    ids = _csv(item.get("artist_seokeys") or item.get("artist_ids"))
-    artists = [
-        {"id": ids[index] if index < len(ids) else "", "name": name, "type": "artist"}
-        for index, name in enumerate(names)
-    ]
+    artists = _normalize_artists_list(item)
     streams = (item.get("stream_urls") or {}).get("urls") or {}
     # Catalog records may already be normalized and carry a single playable
     # URL instead of the provider's quality map. Preserve it when present so
@@ -237,8 +398,9 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
 
 def album(item: dict[str, Any]) -> dict[str, Any]:
     label_registry.observe_album(item)
-    names = _csv(item.get("artists"))
-    ids = _csv(item.get("artist_seokeys") or item.get("artist_ids"))
+    artist_values = _normalize_artists_list(item)
+    names = [a["name"] for a in artist_values]
+    ids = [a["id"] for a in artist_values]
     title = str(item.get("title") or item.get("name") or "")
     artwork_url = _image(item)
     release_date = item.get("release_date") or None
@@ -248,10 +410,6 @@ def album(item: dict[str, Any]) -> dict[str, Any]:
             release_year = int(str(release_date)[:4])
         except ValueError:
             release_year = None
-    artist_values = [
-        {"id": ids[index] if index < len(ids) else "", "name": name, "type": "artist"}
-        for index, name in enumerate(names)
-    ]
     track_count = _int(item.get("track_count") or item.get("song_count"))
     data = {
         "id": str(item.get("seokey") or item.get("id") or ""),

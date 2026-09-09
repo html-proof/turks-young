@@ -16,6 +16,7 @@ import math
 import re
 from typing import Any
 
+from api.catalog.normalize import _clean_artist_id, _clean_artist_str
 from api.catalog.search.ranking import normalize_query
 from api.personalization.models import UserTasteProfile
 from api.personalization.profile_engine import extract_era
@@ -29,8 +30,7 @@ def _canonical_key(track: dict[str, Any]) -> str:
     artists = track.get("artists") or [track.get("artist")] or []
     first_art = ""
     if artists:
-        a = artists[0]
-        first_art = a.get("name") or a.get("id") if isinstance(a, dict) else str(a)
+        first_art = _clean_artist_str(artists[0])
     art_norm = normalize_query(first_art)
     dur = int(track.get("duration") or track.get("duration_ms", 0) / 1000 or 0)
     # Group within 10-second duration buckets
@@ -72,8 +72,8 @@ class RankingEngine:
         artist_scores = []
         primary_artist = ""
         for a in track_artists:
-            name = str(a.get("name") if isinstance(a, dict) else a or "").strip()
-            aid = str(a.get("id") if isinstance(a, dict) else a or "").strip()
+            name = _clean_artist_str(a)
+            aid = _clean_artist_id(a)
             if not primary_artist and name:
                 primary_artist = name
             for key in (aid.lower(), name.lower()):
@@ -256,8 +256,7 @@ class RankingEngine:
         def _primary_art(item: dict[str, Any]) -> str:
             arts = item.get("artists") or [item.get("artist")] or []
             if arts:
-                a = arts[0]
-                return str(a.get("name") if isinstance(a, dict) else a or "").lower().strip()
+                return _clean_artist_str(arts[0]).lower().strip()
             return ""
 
         while remaining and len(final_list) < limit:
