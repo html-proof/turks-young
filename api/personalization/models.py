@@ -104,6 +104,10 @@ class ListeningEvent(TrackSnapshot):
     played_seconds: int = Field(default=0, ge=0, le=86400)
     completed: bool = False
     source: str = Field(default="playback", min_length=1, max_length=50)
+    event_type: str = Field(default="song_play", max_length=50)
+    duration_ms: int = Field(default=0, ge=0)
+    completion_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    session_id: str | None = Field(default=None, max_length=100)
 
     @field_validator("played_seconds", mode="before")
     @classmethod
@@ -322,3 +326,72 @@ class SearchInteraction(BaseModel):
     result_type: Literal["song", "artist", "album", "playlist"]
     position: int = Field(ge=0, le=100)
     action: Literal["click", "play", "complete", "skip", "like", "save"]
+
+
+class BehavioralEvent(BaseModel):
+    """User behavioral signal across playback, library, social, and search."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    event_type: str = Field(min_length=1, max_length=50)
+    song_id: str | None = Field(default=None, max_length=200)
+    artist_id: str | None = Field(default=None, max_length=200)
+    album_id: str | None = Field(default=None, max_length=200)
+    playlist_id: str | None = Field(default=None, max_length=200)
+    played_seconds: int = Field(default=0, ge=0)
+    duration_ms: int = Field(default=0, ge=0)
+    completion_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    source: str = Field(default="app", max_length=50)
+    session_id: str | None = Field(default=None, max_length=100)
+    query: str | None = Field(default=None, max_length=200)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    timestamp: str | None = None
+
+
+class UserTasteProfile(BaseModel):
+    """Continuously updated 3-tier preference vector for a user UUID."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    user_id: str
+    languages: dict[str, float] = Field(default_factory=dict)
+    artists: dict[str, float] = Field(default_factory=dict)
+    genres: dict[str, float] = Field(default_factory=dict)
+    eras: dict[str, float] = Field(default_factory=dict)
+    long_term: dict[str, dict[str, float]] = Field(default_factory=dict)
+    short_term: dict[str, dict[str, float]] = Field(default_factory=dict)
+    current_session: dict[str, dict[str, float]] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    interaction_count: int = 0
+    discovery_receptivity: float = 0.5
+    algorithm_version: str = "rec_v2"
+    updated_at: str | None = None
+
+
+class RecommendationCandidate(BaseModel):
+    """Internal candidate representation with ranking score and explanation."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    id: str
+    title: str
+    artists: list[str] = Field(default_factory=list)
+    artist_ids: list[str] = Field(default_factory=list)
+    language: str = ""
+    album: str = ""
+    image_url: str | None = None
+    score: float = 0.0
+    reasons: list[str] = Field(default_factory=list)
+    source: str = "recommendation"
+
+
+class GeneratedPlaylistSnapshot(BaseModel):
+    """Personalized generated mix snapshot (Daily Mix, On Repeat, etc.)."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    id: str
+    user_id: str
+    mix_type: str
+    title: str
+    description: str = ""
+    tracks: list[dict[str, Any]] = Field(default_factory=list)
+    cover_url: str | None = None
+    algorithm_version: str = "rec_v2"
+    generated_at: str | None = None

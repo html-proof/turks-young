@@ -12,6 +12,7 @@ from api.auth import AuthenticatedUser
 from api.personalization.models import (
     AlbumSnapshot,
     ArtistSnapshot,
+    BehavioralEvent,
     DeviceRegister,
     ListeningEvent,
     OnboardingUpdate,
@@ -309,6 +310,198 @@ class PostgresUserRepository:
                             "DELETE FROM user_signals WHERE uid = $1 AND bucket = $2 AND key = $3 AND score = 0",
                             uid, bucket, key,
                         )
+
+    async def record_behavioral_event(self, uid: str, event: BehavioralEvent) -> dict[str, Any]:
+        record = event.model_dump(mode="json")
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO user_events (
+                    user_id, event_type, song_id, artist_id, album_id, playlist_id,
+                    position_ms, duration_ms, source, context_id, query, payload, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, now())
+                RETURNING id, created_at
+                """,
+                uid,
+                event.event_type,
+                event.song_id,
+                event.artist_id,
+                event.album_id,
+                event.playlist_id,
+                int(event.played_seconds * 1000) if event.played_seconds else 0,
+                event.duration_ms,
+                event.source,
+                event.session_id,
+                event.query,
+                json.dumps(event.payload or {}),
+            )
+        record["id"] = str(row["id"])
+        record["created_at"] = row["created_at"].isoformat()
+        return record
+
+    async def list_behavioral_events(self, uid: str, limit: int = 100) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, event_type, song_id, artist_id, album_id, playlist_id,
+                       position_ms, duration_ms, source, context_id, query, payload, created_at
+                FROM user_events
+                WHERE user_id = $1
+                ORDER BY created_at DESC LIMIT $2
+                """,
+                uid, limit,
+            )
+        out = []
+        for r in rows:
+            out.append({
+                "id": str(r["id"]),
+                "event_type": r["event_type"],
+                "song_id": r["song_id"],
+                "artist_id": r["artist_id"],
+                "album_id": r["album_id"],
+                "playlist_id": r["playlist_id"],
+                "played_seconds": int((r["position_ms"] or 0) / 1000),
+                "duration_ms": r["duration_ms"] or 0,
+                "completion_ratio": min(1.0, (r["position_ms"] / max(1, r["duration_ms"]))) if (r["position_ms"] and r["duration_ms"]) else 0.0,
+                "source": r["source"] or "app",
+                "session_id": r["context_id"],
+                "query": r["query"],
+                "payload": json.loads(r["payload"]) if isinstance(r["payload"], str) else (r["payload"] or {}),
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            })
+        return out
+
+    async def get_taste_profile(self, uid: str) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT languages, artists, genres, eras, session_intent, metrics,
+                       algorithm_version, updated_at
+                FROM user_taste_profiles
+                WHERE user_id = $1
+                """,
+                uid,
+            )
+        if not row:
+            return None
+        return {
+            "user_id": uid,
+            "languages": json.loads(row["languages"]) if isinstance(row["languages"], str) else (row["languages"] or {}),
+            "artists": json.loads(row["artists"]) if isinstance(row["artists"], str) else (row["artists"] or {}),
+            "genres": json.loads(row["genres"]) if isinstance(row["genres"], str) else (row["genres"] or {}),
+            "eras": json.loads(row["eras"]) if isinstance(row["eras"], str) else (row["eras"] or {}),
+            "session_intent": json.loads(row["session_intent"]) if isinstance(row["session_intent"], str) else (row["session_intent"] or {}),
+            "metrics": json.loads(row["metrics"]) if isinstance(row["metrics"], str) else (row["metrics"] or {}),
+            "algorithm_version": row["algorithm_version"],
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+
+    async def save_taste_profile(self, uid: str, profile_data: dict[str, Any]) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO user_taste_profiles (
+                    user_id, languages, artists, genres, eras, session_intent, metrics,
+                    algorithm_version, updated_at
+                ) VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8, now())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    languages = EXCLUDED.languages,
+                    artists = EXCLUDED.artists,
+                    genres = EXCLUDED.genres,
+                    eras = EXCLUDED.eras,
+                    session_intent = EXCLUDED.session_intent,
+                    metrics = EXCLUDED.metrics,
+                    algorithm_version = EXCLUDED.algorithm_version,
+                    updated_at = now();
+                """,
+                uid,
+                json.dumps(profile_data.get("languages", {})),
+                json.dumps(profile_data.get("artists", {})),
+                json.dumps(profile_data.get("genres", {})),
+                json.dumps(profile_data.get("eras", {})),
+                json.dumps(profile_data.get("current_session", {})),
+                json.dumps(profile_data.get("metrics", {})),
+                profile_data.get("algorithm_version", "rec_v2"),
+            )
+
+    async def record_impressions(
+        self,
+        uid: str,
+        items: list[dict[str, Any]],
+        section_id: str = "home_feed",
+    ) -> None:
+        if not items:
+            return
+        async with self._pool.acquire() as conn:
+            for idx, item in enumerate(items[:30]):
+                cid = str(item.get("id") or item.get("seokey") or "").strip()
+                if not cid:
+                    continue
+                ctype = str(item.get("type") or "song")
+                rec_meta = item.get("recommendation") or {}
+                score = float(rec_meta.get("score") or 0.0)
+                reasons = rec_meta.get("reasons") or []
+                reason = reasons[0] if reasons else None
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO recommendation_impressions (
+                            user_id, content_type, content_id, section_id,
+                            rank_position, recommendation_score, reason, shown_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+                        """,
+                        uid, ctype, cid, section_id, idx, score, reason,
+                    )
+                except Exception:
+                    pass
+
+    async def get_impression_counts(self, uid: str, candidate_ids: list[str]) -> dict[str, int]:
+        if not candidate_ids:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT content_id, count(*) as count
+                FROM recommendation_impressions
+                WHERE user_id = $1 AND content_id = ANY($2)
+                  AND clicked_at IS NULL AND played_at IS NULL
+                  AND shown_at >= now() - INTERVAL '7 days'
+                GROUP BY content_id
+                """,
+                uid, candidate_ids,
+            )
+        return {r["content_id"]: int(r["count"]) for r in rows}
+
+    async def get_collaborative_candidates(self, uid: str, limit: int = 40) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH my_favs AS (
+                    SELECT seokey FROM user_favorites WHERE uid = $1
+                ),
+                similar_users AS (
+                    SELECT uf.uid, count(*) as overlap
+                    FROM user_favorites uf
+                    JOIN my_favs mf ON uf.seokey = mf.seokey
+                    WHERE uf.uid <> $1
+                    GROUP BY uf.uid
+                    ORDER BY overlap DESC
+                    LIMIT 10
+                )
+                SELECT uf.track
+                FROM user_favorites uf
+                JOIN similar_users su ON uf.uid = su.uid
+                WHERE uf.seokey NOT IN (SELECT seokey FROM my_favs)
+                ORDER BY su.overlap DESC, uf.favorited_at DESC
+                LIMIT $2;
+                """,
+                uid, limit,
+            )
+        out = []
+        for r in rows:
+            t = json.loads(r["track"]) if isinstance(r["track"], str) else dict(r["track"])
+            out.append(t)
+        return out
 
     async def list_playlists(self, uid: str) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:

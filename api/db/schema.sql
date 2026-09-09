@@ -218,3 +218,20 @@ CREATE INDEX IF NOT EXISTS idx_official_labels_canonical
 CREATE INDEX IF NOT EXISTS idx_official_labels_verified
   ON official_labels(verified);
 
+CREATE TABLE IF NOT EXISTS generated_playlists (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+  mix_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  track_ids TEXT[] NOT NULL DEFAULT '{}',
+  tracks JSONB NOT NULL DEFAULT '[]'::jsonb,
+  cover_url TEXT,
+  algorithm_version TEXT NOT NULL DEFAULT 'rec_v2',
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_generated_playlists_user_type
+  ON generated_playlists (user_id, mix_type, generated_at DESC);
+
+

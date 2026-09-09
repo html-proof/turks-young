@@ -9,6 +9,7 @@ from api.firebase import FirebaseRuntime
 from api.personalization.models import (
     AlbumSnapshot,
     ArtistSnapshot,
+    BehavioralEvent,
     DeviceRegister,
     ListeningEvent,
     OnboardingUpdate,
@@ -155,6 +156,56 @@ async def clear_signals(
 ) -> dict[str, bool]:
     await repository.clear_signals(user.uid)
     return {"deleted": True}
+
+
+@router.post("/events", status_code=status.HTTP_201_CREATED, summary="Record a behavioral event (like, skip, repeat, search, playlist).")
+async def record_event(
+    event: BehavioralEvent,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    if hasattr(repository, "record_behavioral_event"):
+        return await repository.record_behavioral_event(user.uid, event)
+    return {"status": "ok"}
+
+
+@router.get("/mixes", summary="Get personalized mixes for the current user.")
+async def get_mixes(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+    service: PersonalizedMusicService = Depends(get_personalization_service),
+) -> list[dict[str, Any]]:
+    catalog = getattr(request.app.state, "gaanapy", None)
+    if catalog is None:
+        raise HTTPException(status_code=503, detail="Music catalog is unavailable")
+    if hasattr(service, "get_personalized_mixes"):
+        return await service.get_personalized_mixes(user.uid, catalog)
+    return []
+
+
+@router.get("/taste-profile", summary="Get the current 3-tier taste profile for the current user.")
+async def get_taste_profile(
+    session_id: str | None = Query(None, max_length=100),
+    user: AuthenticatedUser = Depends(get_current_user),
+    service: PersonalizedMusicService = Depends(get_personalization_service),
+) -> dict[str, Any]:
+    if hasattr(service, "get_taste_profile"):
+        profile = await service.get_taste_profile(user.uid, session_id=session_id)
+        return profile.model_dump(mode="json")
+    return {"user_id": user.uid, "languages": {}, "artists": {}, "genres": {}}
+
+
+@router.post("/impressions", status_code=status.HTTP_200_OK, summary="Record recommendation impressions.")
+async def record_impressions(
+    payload: dict[str, Any],
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, bool]:
+    items = payload.get("items") or []
+    section_id = str(payload.get("section_id") or "home_feed")
+    if hasattr(repository, "record_impressions") and items:
+        await repository.record_impressions(user.uid, items, section_id=section_id)
+    return {"recorded": True}
 
 
 @router.get("/recommendations", summary="Get personalized track recommendations.")

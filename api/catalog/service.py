@@ -1257,13 +1257,76 @@ class CatalogService:
             if values:
                 sections.append({"id": section_id, "type": section_type, "title": title, "items": values})
 
-        add("recently_played", "songs", "Recently Played", [song(value) for value in history])
-        add("made_for_you", "songs", "Made For You", [song(value) for value in recommended])
-        add("liked_songs", "songs", "Liked Songs", [song(value) for value in favorites])
-        add("saved_albums", "albums", "Saved Albums", [album(value) for value in albums_raw])
-        add("followed_artists", "artists", "Followed Artists", [artist(value) for value in artists_raw])
-        add("your_playlists", "playlists", "Your Playlists", [playlist(value) for value in playlists_raw])
+        # 1. Made For You (Top personalized recommendation tracks)
+        add("made_for_you", "songs", "Made For You", [song(value) for value in recommended[:20]])
 
+        # 2. Recently Played (only when user has history)
+        if history:
+            add("recently_played", "songs", "Recently Played", [song(value) for value in history[:15]])
+
+        # 3. Dynamic taste-based sections from taste profile
+        if hasattr(recommendations, "get_taste_profile"):
+            try:
+                taste_profile = await recommendations.get_taste_profile(uid, session_id=session_id)
+                
+                # 3a. Session intent section (if user engaged in a session pivot)
+                session_arts = taste_profile.current_session.get("artists", {})
+                if session_arts:
+                    top_session_art = next(iter(session_arts.keys()))
+                    session_matches = [
+                        song(v) for v in recommended
+                        if any(top_session_art in str(a.get("name") if isinstance(a, dict) else a).lower()
+                               for a in (v.get("artists") or [v.get("artist")] or []))
+                    ][:15]
+                    if session_matches:
+                        add("because_session", "songs", f"Because You Explored {top_session_art.title()}", session_matches)
+
+                # 3b. "Because You Listened to [Top Artist]"
+                top_arts = sorted(taste_profile.artists.items(), key=lambda x: x[1], reverse=True)
+                if top_arts:
+                    fav_artist_name = top_arts[0][0]
+                    artist_matches = [
+                        song(v) for v in recommended
+                        if any(fav_artist_name in str(a.get("name") if isinstance(a, dict) else a).lower()
+                               for a in (v.get("artists") or [v.get("artist")] or []))
+                    ][:15]
+                    if artist_matches:
+                        add("because_favorite_artist", "songs", f"Because You Love {fav_artist_name.title()}", artist_matches)
+
+                # 3c. "Your [Top Language] Mix"
+                top_langs = sorted(taste_profile.languages.items(), key=lambda x: x[1], reverse=True)
+                if top_langs:
+                    fav_lang = top_langs[0][0]
+                    lang_matches = [
+                        song(v) for v in recommended
+                        if str(v.get("language") or "").lower().strip() == fav_lang.lower().strip()
+                    ][:15]
+                    if lang_matches:
+                        add("your_language_mix", "songs", f"Your {fav_lang.title()} Mix", lang_matches)
+
+                # 3d. "On Repeat" (tracks played 2+ times with completion)
+                repeat_counts: dict[str, int] = {}
+                repeat_tracks: dict[str, dict[str, Any]] = {}
+                for h in history:
+                    sk = str(h.get("id") or h.get("seokey") or "").lower().strip()
+                    if sk:
+                        repeat_counts[sk] = repeat_counts.get(sk, 0) + 1
+                        if sk not in repeat_tracks:
+                            repeat_tracks[sk] = song(h)
+                repeated = [repeat_tracks[k] for k, c in repeat_counts.items() if c >= 2][:12]
+                if repeated:
+                    add("on_repeat", "songs", "On Repeat", repeated)
+
+            except Exception as exc:
+                logger.debug("Dynamic section personalization notice: %s", exc)
+
+        # 4. User library sections
+        add("liked_songs", "songs", "Liked Songs", [song(value) for value in favorites[:20]])
+        add("saved_albums", "albums", "Saved Albums", [album(value) for value in albums_raw[:20]])
+        add("followed_artists", "artists", "Followed Artists", [artist(value) for value in artists_raw[:20]])
+        add("your_playlists", "playlists", "Your Playlists", [playlist(value) for value in playlists_raw[:20]])
+
+        # 5. Trending & New Releases in user preferred languages
         preferred = self.languages.resolve(profile.get("language_ids") or [])
         if preferred:
             # Rotate language index when refresh_generation > 0 so refreshing explores all user languages
@@ -1275,9 +1338,9 @@ class CatalogService:
                 return_exceptions=True,
             )
             if not isinstance(trending, Exception):
-                add("trending", "songs", "Trending Now", items(_clean(trending), "song"))
+                add("trending", "songs", f"Trending in {chosen_lang.title()}", items(_clean(trending), "song"))
             if not isinstance(releases, Exception):
-                add("new_releases", "albums", "New Releases", items(_clean(releases), "album"))
+                add("new_releases", "albums", f"New Releases in {chosen_lang.title()}", items(_clean(releases), "album"))
 
         allowed = {"all": None, "song": "song", "album": "album", "artist": "artist", "playlist": "playlist"}
         selected = allowed.get(content_type, None)

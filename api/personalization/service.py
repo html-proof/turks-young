@@ -1,16 +1,10 @@
 """
-PersonalizedMusicService – orchestrates recommendation generation.
+PersonalizedMusicService – Orchestrates production-grade music recommendations.
 
-Algorithm overview
-------------------
-1. Gather user data in parallel (profile, favorites, history, signals).
-2. Build a unified preference-score map from all sources via scorer.py.
-3. Generate candidate tracks from multiple parallel fetches:
-   - Search the catalog with top artist/genre seeds (interleaved for variety).
-   - Fetch trending tracks for every preferred language (not just the top one).
-   - Fetch new releases for the top preferred language.
-4. Score every candidate track against preferences; apply recency penalty.
-5. Deduplicate, apply a per-artist diversity filter, and return top-N.
+Three-Stage Architecture:
+  Stage 1: Multi-Source Candidate Retrieval (~650 candidates across 7 sources)
+  Stage 2: Multi-Factor Feature Scoring with time decay, session intent, skip, repeat, & impression penalties
+  Stage 3: Re-ranking with diversity caps, adaptive discovery balancing, canonical deduplication, and explanation tags
 """
 
 from __future__ import annotations
@@ -19,14 +13,12 @@ import asyncio
 import logging
 from typing import Any, Protocol
 
-from api.personalization.repository import FirebaseUserRepository
-from api.personalization.scorer import (
-    apply_diversity,
-    build_preference_scores,
-    build_search_seeds,
-    preferred_languages,
-    score_track,
-)
+from api.catalog.normalize import song
+from api.personalization.candidate_generator import CandidateGenerator
+from api.personalization.mix_generator import MixGenerator
+from api.personalization.models import TrackSnapshot, UserTasteProfile
+from api.personalization.profile_engine import ProfileEngine
+from api.personalization.ranking_engine import RankingEngine
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +31,20 @@ class MusicCatalog(Protocol):
 
 class PersonalizedMusicService:
     MAX_SEARCH_SEEDS      = 6    # top artist+genre seeds to search
-    CANDIDATES_PER_SEED   = 8    # tracks fetched per seed
-    CANDIDATES_TRENDING   = 12   # tracks fetched per language trending
-    CANDIDATES_NEW        = 8    # tracks fetched for new releases
-    MAX_PER_ARTIST        = 3    # diversity cap per artist in final list
+    CANDIDATES_PER_SEED   = 10   # tracks fetched per seed
+    CANDIDATES_TRENDING   = 20   # tracks fetched per language trending
+    CANDIDATES_NEW        = 15   # tracks fetched for new releases
+    MAX_PER_ARTIST        = 2    # diversity cap per artist in final list
     HISTORY_CONTEXT       = 100  # events to load for signal computation
 
-    def __init__(self, repository: FirebaseUserRepository) -> None:
+    def __init__(self, repository: Any, cache: Any | None = None) -> None:
         self.repository = repository
+        self.cache = cache
+        self.profile_engine = ProfileEngine(cache=cache)
+        self.ranking_engine = RankingEngine()
+        self.mix_generator = MixGenerator(repository=repository)
 
-    # ─── Public API ───────────────────────────────────────────────────────────
+    # ─── Public Recommendation API ────────────────────────────────────────────
 
     async def recommendations(
         self,
@@ -60,110 +56,155 @@ class PersonalizedMusicService:
         exclude_ids: list[str] | set[str] | None = None,
         cursor: int = 0,
     ) -> list[dict[str, Any]]:
-        """Return up to *limit* personalised track recommendations, rotated by generation."""
+        """Return up to *limit* personalized track recommendations using 3-stage pipeline."""
 
-        # 1. Gather user data in parallel.
-        profile, favorites, history, signals = await asyncio.gather(
+        # 1. Gather user data concurrently
+        b_events_task = (
+            self.repository.list_behavioral_events(uid, 100)
+            if hasattr(self.repository, "list_behavioral_events")
+            else asyncio.sleep(0, result=[])
+        )
+
+        profile_row, favorites, history, behavioral_events = await asyncio.gather(
             self.repository.get_profile(uid),
             self.repository.list_favorites(uid),
             self.repository.list_history(uid, self.HISTORY_CONTEXT),
-            self.repository.get_signals(uid),
+            b_events_task,
         )
 
-        # 2. Build unified preference scores with rotation based on refresh_generation.
-        preferences = build_preference_scores(profile, favorites, history, signals)
-        seeds     = build_search_seeds(preferences, self.MAX_SEARCH_SEEDS, seed_offset=refresh_generation * 2)
-        languages = preferred_languages(profile, preferences, max_languages=3)
+        # 2. Build 3-tier user taste profile (long-term, short-term, session intent)
+        taste_profile = self.profile_engine.build_profile(
+            user_id=uid,
+            profile_row=profile_row,
+            favorites=favorites,
+            history_events=history,
+            behavioral_events=behavioral_events,
+            current_session_id=session_id,
+        )
 
-        # 3. Build candidate fetch jobs.
-        jobs: list[tuple[str, Any]] = []
+        # Asynchronously persist taste profile to database
+        if hasattr(self.repository, "save_taste_profile"):
+            try:
+                asyncio.create_task(self.repository.save_taste_profile(uid, taste_profile.model_dump()))
+            except Exception:
+                pass
 
-        # 3a. Catalog search seeds (artist + genre interleaved, rotating).
-        per_seed = max(4, min(self.CANDIDATES_PER_SEED * 2, limit * 2))
-        for seed in seeds:
-            jobs.append((
-                f"Because you like {seed}",
-                catalog.search_songs(seed, per_seed),
-            ))
+        # 3. Stage 1: Multi-Source Candidate Generation (~650 candidates)
+        cand_gen = CandidateGenerator(catalog, repository=self.repository)
+        candidates = await cand_gen.generate_candidates(
+            taste_profile,
+            recent_history=history,
+            refresh_generation=refresh_generation,
+        )
 
-        # 3b. Trending for preferred languages.
-        for lang in languages:
-            jobs.append((
-                f"Trending in {lang}",
-                catalog.get_trending(lang, self.CANDIDATES_TRENDING),
-            ))
-
-        # 3c. New releases in the preferred language (rotating if multiple).
-        if languages and hasattr(catalog, "get_new_releases"):
-            lang_to_use = languages[refresh_generation % len(languages)]
-            jobs.append((
-                f"New in {lang_to_use}",
-                catalog.get_new_releases(lang_to_use, self.CANDIDATES_NEW),
-            ))
-
-        # A true cold start returns no recommendations until backend-owned
-        # preferences or activity exist. Never seed the UI with default music.
-        if not jobs:
+        if not candidates:
             return []
 
-        # 4. Fetch all candidates concurrently.
-        raw_results = await asyncio.gather(
-            *[coro for _, coro in jobs],
-            return_exceptions=True,
-        )
-
-        # 5. Flatten, exclude, and score candidates.
+        # 4. Gather history map & impression penalties
         excluded_keys: set[str] = {
-            str(item.get("seokey", "")).lower() for item in favorites if item.get("seokey")
+            str(item.get("seokey", "")).lower().strip() for item in favorites if item.get("seokey")
         }
         if exclude_ids:
             for ex in exclude_ids:
                 if ex:
                     excluded_keys.add(str(ex).lower().strip())
 
-        # Build a recency map: seokey → most-recent played_at string.
-        history_map: dict[str, str] = {}
+        history_map: dict[str, dict[str, Any]] = {}
         for event in history:
-            sk = event.get("seokey", "")
-            if sk and (sk not in history_map or event.get("played_at", "") > history_map[sk]):
-                history_map[sk] = event.get("played_at", "")
+            sk = str(event.get("seokey") or event.get("id") or "").lower().strip()
+            if sk:
+                history_map[sk] = event
 
-        ranked: dict[str, dict[str, Any]] = {}
-        for (source, _), result in zip(jobs, raw_results):
-            if isinstance(result, Exception):
-                logger.warning("Candidate fetch failed for '%s': %s", source, result)
+        candidate_ids = [
+            str(c.get("id") or c.get("seokey") or "").strip()
+            for c in candidates if str(c.get("id") or c.get("seokey"))
+        ]
+        impression_counts: dict[str, int] = {}
+        if hasattr(self.repository, "get_impression_counts"):
+            try:
+                impression_counts = await self.repository.get_impression_counts(uid, candidate_ids)
+            except Exception as exc:
+                logger.debug("Failed to fetch impression counts: %s", exc)
+
+        # 5. Stage 2: Score Candidates
+        filtered_candidates: list[dict[str, Any]] = []
+        for track in candidates:
+            tid = str(track.get("id") or track.get("seokey") or "").lower().strip()
+            if not tid or tid in excluded_keys:
                 continue
-            if not isinstance(result, list):
-                continue
-            for track in result:
-                if not isinstance(track, dict):
-                    continue
-                seokey = str(track.get("seokey") or "").lower().strip()
-                track_id = str(track.get("id") or track.get("track_id") or "").lower().strip()
-                if not seokey or seokey in excluded_keys or (track_id and track_id in excluded_keys):
-                    continue
 
-                tr_score, reasons = score_track(track, preferences, source, history_map)
+            score, reasons = self.ranking_engine.score_candidate(
+                track,
+                taste_profile,
+                history_map,
+                impression_counts,
+            )
+            track["_ranking_score"] = score
+            track["_ranking_reasons"] = reasons
+            filtered_candidates.append(track)
 
-                existing = ranked.get(seokey)
-                if existing is None or existing["recommendation"]["score"] < tr_score:
-                    ranked[seokey] = {
-                        **track,
-                        "recommendation": {
-                            "score": round(tr_score, 2),
-                            "reasons": reasons[:3],
-                        },
-                    }
-
-        # 6. Sort → diversity filter (no consecutive same artist) → return top-N.
-        sorted_tracks = sorted(
-            ranked.values(),
-            key=lambda item: item["recommendation"]["score"],
-            reverse=True,
+        # 6. Stage 3: Re-Ranking & Diversity
+        diverse_page = self.ranking_engine.rerank_and_diversify(
+            filtered_candidates,
+            max_per_artist=self.MAX_PER_ARTIST,
+            discovery_receptivity=taste_profile.discovery_receptivity,
+            limit=limit,
+            offset=cursor,
         )
-        diverse_tracks = apply_diversity(sorted_tracks, self.MAX_PER_ARTIST, max_consecutive_per_artist=1)
-        start_idx = max(0, cursor)
-        return diverse_tracks[start_idx : start_idx + limit]
+
+        # Asynchronously record impressions for shown items
+        if hasattr(self.repository, "record_impressions") and diverse_page:
+            try:
+                asyncio.create_task(self.repository.record_impressions(uid, diverse_page, "home_feed"))
+            except Exception:
+                pass
+
+        return diverse_page
+
+    async def get_taste_profile(self, uid: str, session_id: str | None = None) -> UserTasteProfile:
+        """Return the current 3-tier taste profile for a user UUID."""
+        b_events_task = (
+            self.repository.list_behavioral_events(uid, 100)
+            if hasattr(self.repository, "list_behavioral_events")
+            else asyncio.sleep(0, result=[])
+        )
+        profile_row, favorites, history, behavioral_events = await asyncio.gather(
+            self.repository.get_profile(uid),
+            self.repository.list_favorites(uid),
+            self.repository.list_history(uid, self.HISTORY_CONTEXT),
+            b_events_task,
+        )
+        return self.profile_engine.build_profile(
+            user_id=uid,
+            profile_row=profile_row,
+            favorites=favorites,
+            history_events=history,
+            behavioral_events=behavioral_events,
+            current_session_id=session_id,
+        )
+
+    async def get_personalized_mixes(
+        self,
+        uid: str,
+        catalog: MusicCatalog,
+    ) -> list[dict[str, Any]]:
+        """Generate virtual personalized mix snapshots (Daily Mix, On Repeat, Rediscover, Language Mixes)."""
+        taste_profile = await self.get_taste_profile(uid)
+        favorites, history = await asyncio.gather(
+            self.repository.list_favorites(uid),
+            self.repository.list_history(uid, 60),
+        )
+        # Fetch candidate songs to populate mixes
+        cand_gen = CandidateGenerator(catalog, repository=self.repository)
+        candidates = await cand_gen.generate_candidates(taste_profile, recent_history=history)
+
+        mixes = self.mix_generator.generate_mixes(
+            taste_profile,
+            favorites=favorites,
+            history=history,
+            candidates=candidates,
+        )
+        return [m.model_dump(mode="json") for m in mixes]
 
     async def rebuild_signals_from_history(self, uid: str) -> int:
         """
@@ -187,17 +228,6 @@ class PersonalizedMusicService:
 
         return len(history)
 
-    # ─── Helpers ──────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _is_cold_start(preferences: dict[str, dict[str, float]]) -> bool:
-        """True when the user has very few accumulated preference signals."""
-        total = sum(
-            sum(v for v in bucket.values())
-            for bucket in preferences.values()
-        )
-        return total < 10.0
-
 
 # ---------------------------------------------------------------------------
 # Internal helper
@@ -205,7 +235,6 @@ class PersonalizedMusicService:
 
 def _history_event_to_track_snapshot(event: dict[str, Any]) -> Any | None:
     """Convert a raw history dict to a TrackSnapshot, or None on failure."""
-    from api.personalization.models import TrackSnapshot
     try:
         return TrackSnapshot.model_validate(event)
     except Exception:
