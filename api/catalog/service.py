@@ -104,10 +104,11 @@ def _clean(result: Any) -> Any:
 
 
 class CatalogService:
-    def __init__(self, catalog: Any, languages: LanguageCatalog, cache: Any | None = None):
+    def __init__(self, catalog: Any, languages: LanguageCatalog, cache: Any | None = None, db_pool: Any | None = None):
         self.catalog = catalog
         self.languages = languages
         self.cache = cache
+        self.db_pool = db_pool
         self._local_tasks: dict[str, asyncio.Task] = {}
 
     async def _cached(self, key: str, ttl: int, loader, stale_ttl: int | None = None):
@@ -119,13 +120,98 @@ class CatalogService:
         logger.info("catalog_timing key=%s total_ms=%.1f cache=%s", key, (time.perf_counter() - started) * 1000, bool(self.cache))
         return value
 
+    async def _db_artists_for_language(self, language_id: str) -> list[dict[str, Any]]:
+        pool = getattr(self, "db_pool", None)
+        if not pool:
+            return []
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT a.id, a.name, a.image_url, a.metadata
+                    FROM artists a
+                    JOIN artist_languages al ON a.id = al.artist_id
+                    WHERE al.language_id = $1
+                    ORDER BY al.confidence DESC, a.name ASC;
+                    """,
+                    language_id,
+                )
+                res: list[dict[str, Any]] = []
+                for row in rows:
+                    img = row["image_url"] or ""
+                    res.append({
+                        "id": row["id"],
+                        "seokey": row["id"],
+                        "name": row["name"],
+                        "image_url": img,
+                        "imageUrl": img,
+                        "image_status": "verified" if img else "placeholder",
+                        "languages": [language_id],
+                        "source": "database",
+                        "verified": True,
+                    })
+                return res
+        except Exception as exc:
+            logger.warning("db artists query failed language=%s error=%s", language_id, exc)
+            return []
+
+    def _async_persist_artists(self, artists: list[dict[str, Any]]) -> None:
+        pool = getattr(self, "db_pool", None)
+        if not pool or not artists:
+            return
+
+        async def _save():
+            try:
+                async with pool.acquire() as conn:
+                    for item in artists:
+                        art_id = str(item.get("id") or item.get("seokey") or "").strip()
+                        name = str(item.get("name") or "").strip()
+                        img = item.get("image_url") or item.get("imageUrl") or None
+                        langs = item.get("languages") or []
+                        if not art_id or not name or len(name) < 2:
+                            continue
+                        metadata = json.dumps({"source": "auto_discovery"})
+                        await conn.execute(
+                            """
+                            INSERT INTO artists (id, name, image_url, metadata, updated_at)
+                            VALUES ($1, $2, $3, $4::jsonb, now())
+                            ON CONFLICT (id) DO UPDATE SET
+                                image_url = COALESCE(artists.image_url, EXCLUDED.image_url),
+                                updated_at = now();
+                            """,
+                            art_id,
+                            name,
+                            img,
+                            metadata,
+                        )
+                        for lang_id in langs:
+                            if isinstance(lang_id, str) and lang_id:
+                                await conn.execute(
+                                    """
+                                    INSERT INTO artist_languages (artist_id, language_id, source, confidence, updated_at)
+                                    VALUES ($1, $2, 'discovery', 0.8, now())
+                                    ON CONFLICT (artist_id, language_id) DO NOTHING;
+                                    """,
+                                    art_id,
+                                    lang_id,
+                                )
+            except Exception as exc:
+                logger.debug("Failed to async persist discovered artists: %s", exc)
+
+        try:
+            asyncio.create_task(_save())
+        except Exception:
+            pass
+
     async def _artist_candidates_for_language(self, language: Language, limit: int, artist_limit: int | None = None) -> list[dict[str, Any]]:
         async def load():
+            db_task = self._db_artists_for_language(language.id)
             return await asyncio.gather(
+                db_task,
                 self.catalog.get_trending(language.name, limit),
-            # Preserve the provider's artist-search contract while the song
-            # and chart sources supply the broader discovery pool.
-            self.catalog.search_artists(language.name, artist_limit or limit),
+                # Preserve the provider's artist-search contract while the song
+                # and chart sources supply the broader discovery pool.
+                self.catalog.search_artists(language.name, artist_limit or limit),
                 self.catalog.search_songs(language.name, limit),
                 return_exceptions=True,
             )
@@ -135,6 +221,10 @@ class CatalogService:
             if isinstance(result, Exception):
                 logger.warning("artist discovery failed language=%s error=%s", language.id, result)
                 continue
+            if isinstance(result, list):
+                for item in result:
+                    if isinstance(item, dict) and item.get("source") == "database":
+                        candidates.append(item)
             candidates.extend(items(_clean(result), "artist"))
             for track in items(_clean(result), "song"):
                 candidates.extend(track.get("artists") or [])
@@ -305,6 +395,7 @@ class CatalogService:
         page = merged[requested_offset:requested_offset + limit]
         before_images = sum(1 for value in page if value.get("image_url") or value.get("imageUrl"))
         page = await self._hydrate_artist_images(page)
+        self._async_persist_artists(page)
         after_images = sum(1 for value in page if value.get("image_url") or value.get("imageUrl"))
         # Candidate responses already include provider artwork. Avoid an extra
         # per-page provider request on the onboarding critical path.

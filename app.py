@@ -181,6 +181,8 @@ async def startup_event():
         try:
             pool = await create_pool(config.DATABASE_URL)
             app.state.db_pool = pool
+            if app.state.catalog_service:
+                app.state.catalog_service.db_pool = pool
             repo = PostgresUserRepository(pool)
             app.state.user_repository = repo
             app.state.personalization_service = PersonalizedMusicService(repo)

@@ -599,3 +599,63 @@ def test_ranking_personalization_cannot_defeat_exact_intent():
         previous_searches=["malayalam"],
     )
     assert results[0]["id"] == "tamil-exact"
+
+
+@pytest.mark.asyncio
+async def test_catalog_service_loads_curated_artists_from_db():
+    languages = LanguageCatalog.from_json(json.dumps([
+        {"id": "tamil", "name": "Tamil", "native_name": "Tamil"}
+    ]))
+
+    class MockConn:
+        async def fetch(self, query, *args):
+            return [
+                {
+                    "id": "anirudh-ravichander",
+                    "name": "Anirudh Ravichander",
+                    "image_url": "https://cdn.example.com/anirudh.jpg",
+                    "metadata": {},
+                }
+            ]
+
+    class MockPool:
+        def acquire(self):
+            class _Ctx:
+                async def __aenter__(self):
+                    return MockConn()
+                async def __aexit__(self, *a):
+                    pass
+            return _Ctx()
+
+    catalog = FakeCatalog()
+    service = CatalogService(catalog, languages, db_pool=MockPool())
+    res = await service.artist_page(["tamil"], 10)
+    assert len(res["items"]) >= 1
+    first = res["items"][0]
+    assert first["id"] == "anirudh-ravichander"
+    assert first["name"] == "Anirudh Ravichander"
+    assert first["image_url"] == "https://cdn.example.com/anirudh.jpg"
+    assert first["image_status"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_catalog_service_handles_db_failure_gracefully():
+    languages = LanguageCatalog.from_json(json.dumps([
+        {"id": "hindi", "name": "Hindi", "native_name": "Hindi"}
+    ]))
+
+    class FailingPool:
+        def acquire(self):
+            class _Ctx:
+                async def __aenter__(self):
+                    raise RuntimeError("Database unreachable")
+                async def __aexit__(self, *a):
+                    pass
+            return _Ctx()
+
+    catalog = FakeCatalog()
+    service = CatalogService(catalog, languages, db_pool=FailingPool())
+    # Should not raise, falls back to catalog provider
+    res = await service.artist_page(["hindi"], 10)
+    assert isinstance(res["items"], list)
+
