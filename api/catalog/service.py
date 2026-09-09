@@ -217,7 +217,7 @@ class CatalogService:
                 self.catalog.search_songs(language.name, limit),
                 return_exceptions=True,
             )
-        results = await self._cached(f"music:artists:{language.id}:v1", config.TTL_ARTIST_DISCOVERY, load, config.STALE_CACHE_TTL)
+        results = await self._cached(f"music:artists:{language.id}:v2", config.TTL_ARTIST_DISCOVERY, load, config.STALE_CACHE_TTL)
         candidates: list[dict[str, Any]] = []
         for result in results:
             if isinstance(result, Exception):
@@ -227,9 +227,19 @@ class CatalogService:
                 for item in result:
                     if isinstance(item, dict) and item.get("source") == "database":
                         candidates.append(item)
-            candidates.extend(items(_clean(result), "artist"))
+            for it in items(_clean(result), "artist"):
+                img = str(it.get("image_url") or it.get("imageUrl") or "").strip()
+                if "dzcdn.net" in img or "placeholder" in img or img.startswith("{"):
+                    it["image_url"] = ""
+                    it["imageUrl"] = ""
+                candidates.append(it)
             for track in items(_clean(result), "song"):
-                candidates.extend(track.get("artists") or [])
+                for it in (track.get("artists") or []):
+                    img = str(it.get("image_url") or it.get("imageUrl") or "").strip()
+                    if "dzcdn.net" in img or "placeholder" in img or img.startswith("{"):
+                        it["image_url"] = ""
+                        it["imageUrl"] = ""
+                    candidates.append(it)
         return candidates
 
     async def _artist_with_image(self, value: dict[str, Any]) -> dict[str, Any]:
@@ -239,7 +249,8 @@ class CatalogService:
         Resolve that ID through the provider instead of making the mobile app
         guess or downloading unrelated search-engine images.
         """
-        if value.get("image_url") or value.get("imageUrl"):
+        img = str(value.get("image_url") or value.get("imageUrl") or "").strip()
+        if img and "dzcdn.net" not in img and "placeholder" not in img and not img.startswith("{"):
             return value
         artist_id = str(value.get("id") or "").strip()
         name = str(value.get("name") or "").strip()
@@ -310,7 +321,7 @@ class CatalogService:
             return {}
 
         resolved = await self._cached(
-            f"music:artist-image:{cache_id}:v1",
+            f"music:artist-image:{cache_id}:v2",
             config.TTL_ARTIST,
             load,
             config.STALE_CACHE_TTL,
@@ -389,6 +400,11 @@ class CatalogService:
                 break
             index += 1
         page = merged[requested_offset:requested_offset + limit]
+        for item in page:
+            img = str(item.get("image_url") or item.get("imageUrl") or "").strip()
+            if "dzcdn.net" in img or "placeholder" in img or img.startswith("{"):
+                item["image_url"] = ""
+                item["imageUrl"] = ""
         before_images = sum(1 for value in page if value.get("image_url") or value.get("imageUrl"))
         page = await self._hydrate_artist_images(page)
         self._async_persist_artists(page)
