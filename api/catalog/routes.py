@@ -26,6 +26,7 @@ async def languages(request: Request, response: Response):
     service = _service(request)
     values = [value.model_dump(mode="json") for value in service.languages.languages]
     cache = getattr(request.app.state, "cache", None)
+    key = "music:languages:v1"
     async def _get_langs():
         return _language_payload(values)
 
