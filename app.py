@@ -176,6 +176,7 @@ async def startup_event():
 
     firebase_runtime.initialize()  # still needed for JWT verification
 
+    app.state.db_error = None
     if config.DATABASE_URL:
         try:
             pool = await create_pool(config.DATABASE_URL)
@@ -188,7 +189,11 @@ async def startup_event():
             await label_registry.load_from_db()
             logger.info('"msg":"postgres connected"')
         except Exception as exc:
-            logger.warning('"msg":"postgres unavailable","error":"%s"', exc)
+            app.state.db_error = f"{type(exc).__name__}: {exc}"
+            logger.error('"msg":"postgres unavailable","error":"%s"', exc)
+    else:
+        app.state.db_error = "DATABASE_URL environment variable is missing / empty"
+        logger.warning('"msg":"DATABASE_URL not set; postgres disabled"')
 
     app.state.lyrics_service = LyricsService(
         provider=lyrics_provider,
@@ -294,13 +299,66 @@ async def health():
 async def ready(request: Request):
     issues = []
     cache: RedisCache = request.app.state.cache
-    if not cache.available:
+    if not cache or not cache.available:
         issues.append("redis_unavailable")
     if request.app.state.gaanapy is None:
         issues.append("gaana_client_not_initialized")
+    if getattr(request.app.state, "db_pool", None) is None:
+        issues.append("database_unavailable")
     if issues:
-        return JSONResponse(status_code=503, content={"status": "degraded", "issues": issues})
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "issues": issues,
+                "db_error": getattr(request.app.state, "db_error", None),
+            },
+        )
     return {"status": "ready"}
+
+
+@app.get("/health/db", tags=["ops"])
+@app.get("/api/health/db", tags=["ops"])
+async def health_db(request: Request):
+    pool = getattr(request.app.state, "db_pool", None)
+    db_error = getattr(request.app.state, "db_error", None)
+    has_url = bool(config.DATABASE_URL)
+    masked_url = (
+        f"{config.DATABASE_URL.split('@')[0].split(':')[0]}://***@{config.DATABASE_URL.split('@')[-1]}"
+        if "@" in config.DATABASE_URL
+        else (config.DATABASE_URL[:15] + "..." if config.DATABASE_URL else "NOT_SET")
+    )
+    if pool is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "disconnected",
+                "has_database_url": has_url,
+                "db_target": masked_url,
+                "error": db_error or "Database pool not initialized",
+                "user_repository_ready": False,
+            },
+        )
+    try:
+        async with pool.acquire() as conn:
+            val = await conn.fetchval("SELECT 1;")
+            user_count = await conn.fetchval("SELECT count(*) FROM users;")
+            return {
+                "status": "connected",
+                "alive": val == 1,
+                "total_users": user_count,
+                "user_repository_ready": getattr(request.app.state, "user_repository", None) is not None,
+            }
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "has_database_url": has_url,
+                "db_target": masked_url,
+            },
+        )
 
 
 @app.api_route("/", methods=["GET", "HEAD"], tags=["ops"])
