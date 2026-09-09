@@ -256,7 +256,7 @@ def _is_stream_expired(data) -> bool:
             url = item.get("stream_url") or ""
             if not url and isinstance(item.get("stream_urls"), dict):
                 urls = item["stream_urls"].get("urls", {})
-                url = urls.get("very_high_quality") or urls.get("high_quality") or urls.get("medium_quality") or ""
+                url = urls.get("high_quality") or urls.get("medium_quality") or urls.get("very_high_quality") or ""
             if url:
                 match = re.search(r"exp=(\d+)", url)
                 if match:

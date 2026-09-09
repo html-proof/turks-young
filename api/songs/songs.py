@@ -1,4 +1,5 @@
 import asyncio
+import re
 from api.provider_search import encoded_query, search_entries
 
 class Songs:
@@ -124,15 +125,22 @@ class Songs:
             if stream_msg:
                 base_url = await functions.decryptLink(stream_msg)
                 if base_url:
+                    base_clean = re.sub(r'\b(?:16|64|128|320)\.mp4', '{bitrate}.mp4', base_url)
                     data['stream_urls']['urls']['very_high_quality'] = (
-                        base_url.replace("64.mp4", "320.mp4").replace("128.mp4", "320.mp4")
+                        base_clean.format(bitrate="320") if "{bitrate}.mp4" in base_clean
+                        else base_url.replace("64.mp4", "320.mp4").replace("128.mp4", "320.mp4")
                     )
                     data['stream_urls']['urls']['high_quality'] = (
-                        base_url.replace("64.mp4", "128.mp4")
+                        base_clean.format(bitrate="128") if "{bitrate}.mp4" in base_clean
+                        else base_url.replace("64.mp4", "128.mp4")
                     )
-                    data['stream_urls']['urls']['medium_quality'] = base_url
+                    data['stream_urls']['urls']['medium_quality'] = (
+                        base_clean.format(bitrate="64") if "{bitrate}.mp4" in base_clean
+                        else base_url
+                    )
                     data['stream_urls']['urls']['low_quality'] = (
-                        base_url.replace("64.mp4", "16.mp4").replace("128.mp4", "16.mp4")
+                        base_clean.format(bitrate="16") if "{bitrate}.mp4" in base_clean
+                        else base_url.replace("64.mp4", "16.mp4").replace("128.mp4", "16.mp4")
                     )
                 else:
                     raise KeyError
@@ -145,9 +153,9 @@ class Songs:
             data['stream_urls']['urls']['low_quality'] = ""
 
         data['stream_url'] = (
-            data['stream_urls']['urls'].get('very_high_quality')
-            or data['stream_urls']['urls'].get('high_quality')
+            data['stream_urls']['urls'].get('high_quality')
             or data['stream_urls']['urls'].get('medium_quality')
+            or data['stream_urls']['urls'].get('very_high_quality')
             or data['stream_urls']['urls'].get('low_quality')
             or ""
         )

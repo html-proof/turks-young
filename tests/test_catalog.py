@@ -118,6 +118,25 @@ def test_song_never_uses_artist_portrait_as_artwork():
     assert value["image_url"] is None
 
 
+def test_song_prioritizes_high_quality_and_preserves_stream_urls():
+    value = song({
+        "id": "song-one",
+        "title": "Song One",
+        "artists": "Artist One",
+        "stream_urls": {
+            "urls": {
+                "very_high_quality": "https://cdn.gaana.com/320.mp4",
+                "high_quality": "https://cdn.gaana.com/128.mp4",
+                "medium_quality": "https://cdn.gaana.com/64.mp4",
+                "low_quality": "https://cdn.gaana.com/16.mp4",
+            }
+        }
+    })
+    assert value["stream_url"] == "https://cdn.gaana.com/128.mp4"
+    assert value["stream_urls"]["urls"]["high_quality"] == "https://cdn.gaana.com/128.mp4"
+    assert value["stream_urls"]["urls"]["very_high_quality"] == "https://cdn.gaana.com/320.mp4"
+
+
 def test_search_song_uses_matching_album_artwork():
     songs = [{
         "id": "song-one",

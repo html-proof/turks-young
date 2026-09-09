@@ -185,10 +185,11 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         "release_date": item.get("release_date") or None,
         "explicit": bool(item.get("is_explicit", False)),
         "stream_url": (
-            streams.get("very_high_quality") or streams.get("high_quality")
-            or streams.get("medium_quality") or streams.get("low_quality")
+            streams.get("high_quality") or streams.get("medium_quality")
+            or streams.get("very_high_quality") or streams.get("low_quality")
             or direct_stream or None
         ),
+        "stream_urls": item.get("stream_urls") or ({"urls": streams} if streams else None),
         "lyrics_url": f"/api/v1/tracks/{item.get('seokey')}/lyrics" if item.get("seokey") else None,
     }
 
