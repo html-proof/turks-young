@@ -128,20 +128,20 @@ class Songs:
                 if base_url:
                     base_clean = re.sub(r'\b(?:16|64|128|320)\.mp4', '{bitrate}.mp4', base_url)
                     data['stream_urls']['urls']['very_high_quality'] = (
-                        base_clean.format(bitrate="320") if "{bitrate}.mp4" in base_clean
-                        else base_url.replace("64.mp4", "320.mp4").replace("128.mp4", "320.mp4")
+                        base_clean.format(bitrate="128") if "{bitrate}.mp4" in base_clean
+                        else base_url.replace("320.mp4", "128.mp4")
                     )
                     data['stream_urls']['urls']['high_quality'] = (
                         base_clean.format(bitrate="128") if "{bitrate}.mp4" in base_clean
-                        else base_url.replace("64.mp4", "128.mp4")
+                        else base_url.replace("64.mp4", "128.mp4").replace("320.mp4", "128.mp4")
                     )
                     data['stream_urls']['urls']['medium_quality'] = (
                         base_clean.format(bitrate="64") if "{bitrate}.mp4" in base_clean
-                        else base_url
+                        else base_url.replace("320.mp4", "64.mp4").replace("128.mp4", "64.mp4")
                     )
                     data['stream_urls']['urls']['low_quality'] = (
                         base_clean.format(bitrate="64") if "{bitrate}.mp4" in base_clean
-                        else base_url.replace("128.mp4", "64.mp4")
+                        else base_url.replace("320.mp4", "64.mp4").replace("128.mp4", "64.mp4")
                     )
                 else:
                     raise KeyError

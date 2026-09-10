@@ -587,6 +587,8 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         or streams.get("very_high_quality") or streams.get("low_quality")
         or direct_stream or None
     )
+    if stream_final and "320.mp4" in stream_final:
+        stream_final = stream_final.replace("320.mp4", "128.mp4")
     artist_image_url = _upgrade_image_quality(item.get("artist_image"))
     if not artist_image_url and artists and artists[0].get("image_url"):
         artist_image_url = artists[0]["image_url"]
