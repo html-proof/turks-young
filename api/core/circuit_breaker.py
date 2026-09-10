@@ -40,6 +40,7 @@ class CircuitBreaker:
         self._state = CBState.CLOSED
         self._failure_times: list[float] = []
         self._opened_at: float = 0.0
+        self._half_open_probing: bool = False
         self._lock = asyncio.Lock()
 
     @property
@@ -58,11 +59,19 @@ class CircuitBreaker:
             if self._state == CBState.OPEN:
                 if now - self._opened_at >= self.recovery_timeout:
                     self._state = CBState.HALF_OPEN
-                    logger.info("circuit_breaker name=%s state=half_open", self.name)
+                    self._half_open_probing = True
+                    logger.info("circuit_breaker name=%s state=half_open (probing)", self.name)
                 else:
                     if hasattr(coro, "close"):
                         coro.close()
                     raise CircuitOpenError(self.name)
+            elif self._state == CBState.HALF_OPEN:
+                if self._half_open_probing:
+                    # Probe already in flight, wait for its verdict
+                    if hasattr(coro, "close"):
+                        coro.close()
+                    raise CircuitOpenError(self.name)
+                self._half_open_probing = True
 
         try:
             result = await coro
@@ -79,17 +88,30 @@ class CircuitBreaker:
             if self._state == CBState.HALF_OPEN:
                 self._state = CBState.CLOSED
                 self._failure_times.clear()
+                self._half_open_probing = False
                 logger.info("circuit_breaker name=%s state=closed (recovered)", self.name)
 
     async def _on_failure(self) -> None:
         async with self._lock:
+            if self._state == CBState.OPEN:
+                # Already open: trailing in-flight failure. Do NOT reset recovery timer, accumulate timestamps, or spam logs.
+                return
+
             now = time.monotonic()
             self._failure_times.append(now)
             self._prune_old_failures()
 
-            if self._state == CBState.HALF_OPEN or (
-                len(self._failure_times) >= self.failure_threshold
-            ):
+            if self._state == CBState.HALF_OPEN:
+                self._state = CBState.OPEN
+                self._opened_at = now
+                self._half_open_probing = False
+                logger.warning(
+                    "circuit_breaker name=%s state=open reason=probe_failed",
+                    self.name,
+                )
+                return
+
+            if len(self._failure_times) >= self.failure_threshold:
                 self._state = CBState.OPEN
                 self._opened_at = now
                 logger.warning(

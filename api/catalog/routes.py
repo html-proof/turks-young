@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 
-from api.auth import AuthenticatedUser, get_current_user
+from api.auth import AuthenticatedUser, get_current_user, get_optional_user
 from api.catalog.models import IdSelection, RecentSearchCreate, envelope
 from api.core.home_state import HOME_STALE, coalesce
 from api.personalization.models import OnboardingUpdate
@@ -72,9 +72,17 @@ async def search(
     kind: Literal["song", "track", "artist", "album", "playlist"] | None = None,
     page: int = Query(1, ge=1, le=1000),
     limit: int = Query(20, ge=1, le=50),
+    user: AuthenticatedUser | None = Depends(get_optional_user),
 ):
     requested_type = type if type is not None else kind
-    result = await _service(request).search(q.strip(), "song" if requested_type == "track" else requested_type, page, limit)
+    user_uid = user.uid if user else None
+    result = await _service(request).search(
+        q.strip(),
+        "song" if requested_type == "track" else requested_type,
+        page,
+        limit,
+        user_uid=user_uid,
+    )
     return envelope(result, query=q.strip())
 
 

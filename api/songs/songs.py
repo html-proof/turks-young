@@ -28,6 +28,20 @@ class Songs:
                         break
 
         if len(entries) == 0:
+            fallback_res = getattr(self, "_fallback_resolver", None)
+            if not fallback_res:
+                try:
+                    from api.stream_fallback import get_stream_fallback_resolver
+                    fallback_res = get_stream_fallback_resolver()
+                except Exception:
+                    fallback_res = None
+            if fallback_res:
+                try:
+                    fb_tracks = await fallback_res.search_tracks(clean_q, limit)
+                    if fb_tracks:
+                        return fb_tracks
+                except Exception:
+                    pass
             return await errors.no_results()
 
         track_ids = []
@@ -40,21 +54,78 @@ class Songs:
         track_info = await self.get_track_info(track_ids)
         return track_info
 
+    async def search_candidates(self, search_query: str, limit: int) -> list:
+        """Lightweight candidate search for recommendations without fanning out songDetail calls."""
+        endpoints = self.api_endpoints
+        clean_q = search_query.strip()
+        result = await self._safe_request("POST", endpoints.search_songs_url + encoded_query(clean_q))
+        entries = search_entries(result) if not (isinstance(result, dict) and "error" in result) else []
+        candidates = []
+        for entry in entries[:limit]:
+            if isinstance(entry, dict):
+                seo = entry.get("seo") or entry.get("seokey") or entry.get("id") or ""
+                title = entry.get("title") or entry.get("track_title") or entry.get("name") or ""
+                artist = entry.get("artist") or entry.get("artists") or []
+                artwork = entry.get("atw") or entry.get("artwork") or entry.get("artwork_large") or ""
+                candidates.append({
+                    "id": str(seo),
+                    "seokey": str(seo),
+                    "track_id": str(entry.get("track_id") or entry.get("id") or ""),
+                    "title": title,
+                    "artist": artist,
+                    "artist_detail": entry.get("artist_detail") or [],
+                    "album": entry.get("album") or entry.get("album_title") or "",
+                    "album_seokey": entry.get("album_seokey") or entry.get("albumseokey") or "",
+                    "duration": entry.get("duration") or 0,
+                    "artwork": artwork,
+                    "language": entry.get("language") or "",
+                })
+        return candidates
+
     async def get_track_info(self, track_id: list) -> list:
         endpoints = self.api_endpoints
         errors = self.errors
-        results = await asyncio.gather(*[
-            self._safe_request("POST", endpoints.song_details_url + i)
-            for i in track_id
-        ])
+        cache = getattr(self, "cache", None)
+
         track_info = []
-        for result in results:
-            if isinstance(result, dict) and "error" in result:
-                continue
-            tracks = result.get('tracks')
-            if not tracks:
-                continue
-            track_info.extend(await asyncio.gather(*[self.format_json_songs(t) for t in tracks]))
+        missing_ids = []
+
+        if cache and hasattr(cache, "get"):
+            for tid in track_id:
+                try:
+                    hit = await cache.get(f"songs:info:{tid}")
+                    if hit and isinstance(hit, list) and len(hit) > 0:
+                        track_info.extend(hit)
+                    else:
+                        missing_ids.append(tid)
+                except Exception:
+                    missing_ids.append(tid)
+        else:
+            missing_ids = list(track_id)
+
+        if missing_ids:
+            results = await asyncio.gather(*[
+                self._safe_request("POST", endpoints.song_details_url + i)
+                for i in missing_ids
+            ])
+            for i, result in zip(missing_ids, results):
+                if isinstance(result, dict) and "error" in result:
+                    continue
+                tracks = result.get('tracks')
+                if not tracks:
+                    continue
+                formatted_tracks = await asyncio.gather(*[self.format_json_songs(t) for t in tracks])
+                valid_formatted = [t for t in formatted_tracks if t and not (isinstance(t, dict) and "error" in t)]
+                if valid_formatted:
+                    track_info.extend(valid_formatted)
+                    if cache and hasattr(cache, "set"):
+                        try:
+                            from api.core import config
+                            ttl = getattr(config, "TTL_SONG", 21600)
+                            await cache.set(f"songs:info:{i}", valid_formatted, ttl)
+                        except Exception:
+                            pass
+
         if len(track_info) == 0:
             return await errors.no_results()
         return track_info
@@ -126,23 +197,19 @@ class Songs:
             if stream_msg:
                 base_url = await functions.decryptLink(stream_msg)
                 if base_url:
+                    data['stream_urls']['urls']['raw'] = base_url
+                    data['stream_urls']['urls']['default'] = base_url
                     base_clean = re.sub(r'\b(?:16|64|128|320)\.mp4', '{bitrate}.mp4', base_url)
-                    data['stream_urls']['urls']['very_high_quality'] = (
-                        base_clean.format(bitrate="128") if "{bitrate}.mp4" in base_clean
-                        else base_url.replace("320.mp4", "128.mp4")
-                    )
-                    data['stream_urls']['urls']['high_quality'] = (
-                        base_clean.format(bitrate="128") if "{bitrate}.mp4" in base_clean
-                        else base_url.replace("64.mp4", "128.mp4").replace("320.mp4", "128.mp4")
-                    )
-                    data['stream_urls']['urls']['medium_quality'] = (
-                        base_clean.format(bitrate="128") if "{bitrate}.mp4" in base_clean
-                        else base_url.replace("64.mp4", "128.mp4").replace("320.mp4", "128.mp4")
-                    )
-                    data['stream_urls']['urls']['low_quality'] = (
-                        base_clean.format(bitrate="64") if "{bitrate}.mp4" in base_clean
-                        else base_url.replace("320.mp4", "64.mp4").replace("128.mp4", "64.mp4")
-                    )
+                    if "{bitrate}.mp4" in base_clean:
+                        data['stream_urls']['urls']['very_high_quality'] = base_clean.format(bitrate="128")
+                        data['stream_urls']['urls']['high_quality'] = base_clean.format(bitrate="128")
+                        data['stream_urls']['urls']['medium_quality'] = base_clean.format(bitrate="128")
+                        data['stream_urls']['urls']['low_quality'] = base_clean.format(bitrate="64")
+                    else:
+                        data['stream_urls']['urls']['very_high_quality'] = base_url
+                        data['stream_urls']['urls']['high_quality'] = base_url
+                        data['stream_urls']['urls']['medium_quality'] = base_url
+                        data['stream_urls']['urls']['low_quality'] = base_url
                 else:
                     raise KeyError
             else:
@@ -156,9 +223,24 @@ class Songs:
         data['stream_url'] = (
             data['stream_urls']['urls'].get('high_quality')
             or data['stream_urls']['urls'].get('medium_quality')
-            or data['stream_urls']['urls'].get('very_high_quality')
+            or data['stream_urls']['urls'].get('default')
+            or data['stream_urls']['urls'].get('raw')
             or data['stream_urls']['urls'].get('low_quality')
             or ""
         )
+
+        # Fallback stream resolution if Gaana has no playable audio stream
+        if not data['stream_url'] and data.get('title'):
+            fallback_res = getattr(self, "_fallback_resolver", None)
+            if fallback_res:
+                try:
+                    fb = await fallback_res.resolve_stream(data['title'], data.get('artists') or '')
+                    if fb and fb.get('stream_url'):
+                        data['stream_url'] = fb['stream_url']
+                        fb_urls = fb.get('stream_urls', {}).get('urls', {})
+                        for k, v in fb_urls.items():
+                            data['stream_urls']['urls'][k] = v
+                except Exception:
+                    pass
 
         return data

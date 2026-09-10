@@ -421,13 +421,77 @@ class CatalogService:
     async def artists_for_languages(self, language_ids: list[str], limit: int) -> list[dict[str, Any]]:
         return (await self.artist_page(language_ids, limit))["items"]
 
-    async def search(self, query: str, kind: str | None, page: int, limit: int) -> dict[str, Any]:
-        mem_key = f"{query.strip().lower()}:{kind}:{page}:{limit}"
+    async def _search_lyrics_candidates(self, text: str) -> list[dict[str, Any]]:
+        """Selective lyrics lookup for queries with >= 3 lyric words."""
+        provider = getattr(self, "lyrics_provider", None)
+        if not provider:
+            return []
+        try:
+            results = await asyncio.wait_for(provider._request("search", {"q": text}), timeout=1.5)
+            if isinstance(results, list):
+                songs: list[dict[str, Any]] = []
+                for r in results[:4]:
+                    track_name = r.get("trackName")
+                    art_name = r.get("artistName")
+                    alb_name = r.get("albumName")
+                    dur = r.get("duration")
+                    if track_name:
+                        cand_id = f"lyrics_{r.get('id')}"
+                        songs.append({
+                            "id": cand_id,
+                            "title": track_name,
+                            "name": track_name,
+                            "artists": [{"name": art_name}] if art_name else [],
+                            "album": alb_name or "",
+                            "duration": dur or 0,
+                            "is_lyrics_match": True,
+                            "source": "lyrics",
+                        })
+                return songs
+        except Exception as exc:
+            logger.debug("lyrics candidate search failed: %s", exc)
+        return []
+
+    async def search(self, query: str, kind: str | None, page: int, limit: int, user_uid: str | None = None) -> dict[str, Any]:
+        from api.catalog.search.parser import AdvancedQueryParser
+        parsed_query = AdvancedQueryParser.parse(query)
+
+        mem_key = f"{query.strip().lower()}:{kind}:{page}:{limit}:{user_uid or 'anon'}"
         now = time.monotonic()
         if mem_key in self._search_mem_cache:
             cached_ts, cached_payload = self._search_mem_cache[mem_key]
             if now - cached_ts < 300:
                 return cached_payload
+
+        # Load personalization signals if user_uid is provided
+        user_languages: list[str] | None = None
+        user_artists: list[str] | None = None
+        history_tracks: list[dict[str, Any]] | None = None
+        previous_searches: list[str] | None = None
+
+        if user_uid and getattr(self, "db_pool", None):
+            try:
+                async with self.db_pool.acquire() as conn:
+                    prof_row = await conn.fetchrow(
+                        "SELECT languages, language_ids, favorite_artists FROM user_profiles WHERE uid = $1",
+                        user_uid,
+                    )
+                    if prof_row:
+                        langs = prof_row.get("languages") or prof_row.get("language_ids") or []
+                        if langs:
+                            user_languages = list(langs)
+                        arts = prof_row.get("favorite_artists") or []
+                        if arts:
+                            user_artists = list(arts)
+
+                    s_rows = await conn.fetch(
+                        "SELECT query FROM recent_searches WHERE uid = $1 ORDER BY searched_at DESC LIMIT 5",
+                        user_uid,
+                    )
+                    if s_rows:
+                        previous_searches = [r["query"] for r in s_rows if r.get("query")]
+            except Exception as exc:
+                logger.debug("search personalization load failed: %s", exc)
 
         methods = {
             "song": self.catalog.search_songs,
@@ -437,15 +501,27 @@ class CatalogService:
         }
         normalized_query = normalize_query(query)
         clean_query, detected_lang = parse_query_language_and_core(query)
-        effective_query = clean_query if clean_query else normalized_query
-        effective_langs = [detected_lang] if detected_lang else None
+        if parsed_query and parsed_query.language:
+            detected_lang = parsed_query.language
+        effective_query = parsed_query.free_text if (parsed_query and parsed_query.free_text) else (clean_query if clean_query else normalized_query)
+        effective_langs = [detected_lang] if detected_lang else user_languages
 
         if kind:
             requested = min(page * limit + 10, 100)
             async def load():
                 return _clean(await methods[kind](effective_query, requested))
             result = await self._cached(f"music:search:{kind}:{effective_query}:{requested}:v11", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
-            normalized = rank(effective_query, items(result, kind), kind, requested, user_languages=effective_langs)
+            normalized = rank(
+                effective_query,
+                items(result, kind),
+                kind,
+                requested,
+                user_languages=effective_langs,
+                user_artists=user_artists,
+                history_tracks=history_tracks,
+                previous_searches=previous_searches,
+                parsed_query=parsed_query,
+            )
             # A movie search often has no movie name in the individual song
             # titles. Include the real soundtrack tracks when the query is an
             # exact/strong album match (for example, "CIA" or "Operation Java").
@@ -461,6 +537,10 @@ class CatalogService:
                                 "album",
                                 10,
                                 user_languages=effective_langs,
+                                user_artists=user_artists,
+                                history_tracks=history_tracks,
+                                previous_searches=previous_searches,
+                                parsed_query=parsed_query,
                             )
                             if _strong_match(effective_query, item, "album")
                         ]
@@ -502,6 +582,10 @@ class CatalogService:
                                 "artist",
                                 5,
                                 user_languages=effective_langs,
+                                user_artists=user_artists,
+                                history_tracks=history_tracks,
+                                previous_searches=previous_searches,
+                                parsed_query=parsed_query,
                             )
                             if _strong_match(effective_query, item, "artist")
                         ][:3]
@@ -524,9 +608,20 @@ class CatalogService:
                     except Exception:
                         pass
 
+                # Deep scan: Lyrics candidate lookup
+                if parsed_query and parsed_query.lyric_candidate:
+                    try:
+                        lyric_hits = await self._search_lyrics_candidates(parsed_query.free_text)
+                        if lyric_hits:
+                            extra_candidates.extend(lyric_hits)
+                    except Exception:
+                        pass
+
                 # Multi-keyword deep scan for combined queries like "believer imagine dragons"
+                from api.core.circuit_breaker import CBState
+                is_cb_open = getattr(self.catalog, "_circuit_breaker", None) and self.catalog._circuit_breaker.state == CBState.OPEN
                 query_words = [w for w in effective_query.split() if len(w) > 2]
-                if len(query_words) > 1 and len(normalized) < 4:
+                if not is_cb_open and len(query_words) > 1 and len(normalized) < 4:
                     try:
                         async def sub_search(w):
                             try:
@@ -546,7 +641,31 @@ class CatalogService:
                         "song",
                         requested,
                         user_languages=effective_langs,
+                        user_artists=user_artists,
+                        history_tracks=history_tracks,
+                        previous_searches=previous_searches,
+                        parsed_query=parsed_query,
                     )
+
+                if not normalized:
+                    try:
+                        from api.stream_fallback import get_stream_fallback_resolver
+                        fb_resolver = get_stream_fallback_resolver()
+                        fb_tracks = await fb_resolver.search_tracks(effective_query, requested)
+                        if fb_tracks:
+                            normalized = rank(
+                                effective_query,
+                                items(fb_tracks, "song"),
+                                "song",
+                                requested,
+                                user_languages=effective_langs,
+                                user_artists=user_artists,
+                                history_tracks=history_tracks,
+                                previous_searches=previous_searches,
+                                parsed_query=parsed_query,
+                            )
+                    except Exception as exc:
+                        logger.debug("Fallback song search failed: %s", exc)
             if kind == "artist":
                 normalized = await self._hydrate_artist_images(normalized)
             logger.info(
@@ -583,7 +702,17 @@ class CatalogService:
             cursor += 1
             if not isinstance(result, Exception):
                 candidates.extend(items(_clean(result), result_kind))
-            grouped[f"{result_kind}s"] = rank(effective_query, candidates, result_kind, preview, user_languages=effective_langs)
+            grouped[f"{result_kind}s"] = rank(
+                effective_query,
+                candidates,
+                result_kind,
+                preview,
+                user_languages=effective_langs,
+                user_artists=user_artists,
+                history_tracks=history_tracks,
+                previous_searches=previous_searches,
+                parsed_query=parsed_query,
+            )
             if result_kind == "artist":
                 grouped["artists"] = await self._hydrate_artist_images(grouped["artists"])
             logger.info(
@@ -658,10 +787,22 @@ class CatalogService:
                 if isinstance(tracks, list):
                     extra_songs.extend(tracks)
 
-        # Deep scan 3: Multi-word query fallback when direct song search is sparse
+        # Deep scan 3: Lyrics candidate retrieval
+        if parsed_query and parsed_query.lyric_candidate:
+            try:
+                lyric_hits = await self._search_lyrics_candidates(parsed_query.free_text)
+                if lyric_hits:
+                    extra_songs.extend(lyric_hits)
+            except Exception:
+                pass
+
+        # Deep scan 4: Multi-word query fallback when direct song search is sparse
         stopwords = {"movie", "film", "songs", "song", "track", "audio", "album", "soundtrack", "the", "and"}
         query_words = [w for w in effective_query.split() if len(w) > 2 and w.lower() not in stopwords]
-        if len(query_words) > 1 and len(grouped.get("songs", [])) < 2:
+        from api.core.circuit_breaker import CBState
+        is_cb_open = getattr(self.catalog, "_circuit_breaker", None) and self.catalog._circuit_breaker.state == CBState.OPEN
+
+        if not is_cb_open and len(query_words) > 1 and len(grouped.get("songs", [])) < 2:
             async def sub_search(w):
                 try:
                     return items(_clean(await asyncio.wait_for(self.catalog.search_songs(w, 8), timeout=1.2)), "song")
@@ -671,6 +812,17 @@ class CatalogService:
             for sub_list in sub_res:
                 extra_songs.extend(sub_list)
 
+        # Fallback provider search if songs are completely missing or circuit breaker is open
+        if not grouped.get("songs") and not extra_songs:
+            try:
+                from api.stream_fallback import get_stream_fallback_resolver
+                fb_resolver = get_stream_fallback_resolver()
+                fb_tracks = await fb_resolver.search_tracks(effective_query, preview)
+                if fb_tracks:
+                    extra_songs.extend(items(fb_tracks, "song"))
+            except Exception as exc:
+                logger.debug("Fallback song search failed in multi-search: %s", exc)
+
         if extra_songs:
             grouped["songs"] = rank(
                 effective_query,
@@ -678,6 +830,10 @@ class CatalogService:
                 "song",
                 preview,
                 user_languages=effective_langs,
+                user_artists=user_artists,
+                history_tracks=history_tracks,
+                previous_searches=previous_searches,
+                parsed_query=parsed_query,
             )
 
         grouped["songs"] = _apply_album_artwork(
@@ -689,9 +845,22 @@ class CatalogService:
                       for key in ("artists", "songs", "albums", "playlists") for item in grouped[key]]
         top = None
         if all_ranked:
-            top_confidence, top_kind, top_item = max(all_ranked, key=lambda value: value[0])
-            if top_confidence >= 0.50:
-                top = {"type": top_kind, "item": top_item, "confidence": round(top_confidence, 3)}
+            # If explicit entity filter was specified (e.g. artist:, album:, song:), prefer top of that kind
+            if parsed_query and parsed_query.filters:
+                for k in ("artist", "singer", "composer", "album", "movie", "song", "playlist"):
+                    if k in parsed_query.filters:
+                        target_kind = "artist" if k in ("artist", "singer", "composer") else ("album" if k in ("album", "movie") else k)
+                        matching_intent_items = [c for c in all_ranked if c[1] == target_kind]
+                        if matching_intent_items:
+                            best_intent = max(matching_intent_items, key=lambda value: value[0])
+                            if best_intent[0] >= 0.40:
+                                top = {"type": best_intent[1], "item": best_intent[2], "confidence": round(best_intent[0], 3)}
+                        break
+
+            if not top:
+                top_confidence, top_kind, top_item = max(all_ranked, key=lambda value: value[0])
+                if top_confidence >= 0.50:
+                    top = {"type": top_kind, "item": top_item, "confidence": round(top_confidence, 3)}
 
         # When Top Result is an Album/Movie (e.g. "CIA" or "Ghilli"), prioritize its soundtrack songs at the top of songs list
         if top and top.get("type") == "album" and top.get("item"):

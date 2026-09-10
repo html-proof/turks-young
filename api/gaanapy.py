@@ -48,6 +48,7 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
             window=config.CB_WINDOW,
             is_failure=_is_gaana_failure,
         )
+        self._upstream_semaphore = asyncio.Semaphore(6)
 
     async def _do_request(self, method: str, url: str, **kwargs) -> dict:
         """Single attempt — raises on any failure."""
@@ -81,7 +82,7 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
         return result
 
     async def _safe_request(self, method: str, url: str, **kwargs) -> dict:
-        """Retry with backoff, guarded by a circuit breaker."""
+        """Retry with backoff, guarded by a circuit breaker and bounded by concurrency semaphore."""
         delays = config.RETRY_DELAYS
         last_exc: Exception | None = None
 
@@ -91,9 +92,10 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
                 await asyncio.sleep(base + random.uniform(0, base * 0.25))
 
             try:
-                return await self._circuit_breaker.call(
-                    self._do_request(method, url, **kwargs)
-                )
+                async with self._upstream_semaphore:
+                    return await self._circuit_breaker.call(
+                        self._do_request(method, url, **kwargs)
+                    )
             except CircuitOpenError:
                 logger.warning("upstream circuit open url=%s", url)
                 return await self.errors.no_results()

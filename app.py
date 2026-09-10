@@ -32,6 +32,7 @@ from api.personalization.v1_routes import router as v1_personalization_router
 from api.pulse.routes import router as pulse_router, api_router as personalized_pulse_router
 from api.personalization.service import PersonalizedMusicService
 from api.core.performance import record as record_performance
+from api.stream_fallback import StreamFallbackResolver
 
 # ---------------------------------------------------------------------------
 # Structured logging
@@ -148,6 +149,7 @@ app.state.cache = None
 app.state.db_pool = None
 app.state.lyrics_service = None
 app.state.catalog_service = None
+app.state.fallback_resolver = None
 
 
 @app.on_event("startup")
@@ -168,11 +170,17 @@ async def startup_event():
         user_agent=config.LYRICS_USER_AGENT,
         timeout=config.LYRICS_TIMEOUT,
     )
+    app.state.catalog_service.lyrics_provider = lyrics_provider
 
     cache = RedisCache(config.UPSTASH_REDIS_REST_URL, config.UPSTASH_REDIS_REST_TOKEN)
     await cache.connect()
     app.state.cache = cache
     app.state.catalog_service.cache = cache
+
+    fallback_resolver = StreamFallbackResolver(cache=cache)
+    app.state.fallback_resolver = fallback_resolver
+    gaanapy._fallback_resolver = fallback_resolver
+    gaanapy.cache = cache
 
     firebase_runtime.initialize()  # still needed for JWT verification
 
@@ -218,6 +226,9 @@ async def shutdown_event():
     cache: RedisCache | None = app.state.cache
     if cache:
         await cache.close()
+    fallback_resolver = getattr(app.state, "fallback_resolver", None)
+    if fallback_resolver:
+        await fallback_resolver.close()
     if app.state.db_pool:
         await app.state.db_pool.close()
     await firebase_runtime.close()
@@ -430,7 +441,37 @@ async def songs_info(
     key = f"songs:info:{seokey}"
     result = await _cached(cache, key, config.TTL_SONG, lambda: gaana.get_track_info([seokey]), force_fresh=refresh)
     if isinstance(result, dict) and "error" in result:
+        fallback_res = getattr(request.app.state, "fallback_resolver", None)
+        if fallback_res:
+            title_guess = seokey.replace("-", " ").title()
+            fb = await fallback_res.resolve_stream(title_guess)
+            if fb and fb.get("stream_url"):
+                synthetic_track = {
+                    "seokey": seokey,
+                    "id": seokey,
+                    "track_id": seokey,
+                    "title": title_guess,
+                    "artists": "",
+                    "album": "",
+                    "duration": "180",
+                    "stream_url": fb["stream_url"],
+                    "stream_urls": fb.get("stream_urls", {}),
+                    "images": {"urls": {"large_artwork": "", "medium_artwork": "", "small_artwork": ""}},
+                }
+                await cache.set(key, [synthetic_track], config.TTL_SONG)
+                return [synthetic_track]
         raise HTTPException(status_code=404, detail=result["error"])
+
+    if isinstance(result, list) and result and not (result[0].get("stream_url") or "").strip():
+        fallback_res = getattr(request.app.state, "fallback_resolver", None)
+        if fallback_res and result[0].get("title"):
+            fb = await fallback_res.resolve_stream(result[0]["title"], result[0].get("artists") or "")
+            if fb and fb.get("stream_url"):
+                result[0]["stream_url"] = fb["stream_url"]
+                if fb.get("stream_urls"):
+                    result[0]["stream_urls"] = fb["stream_urls"]
+                await cache.set(key, result, config.TTL_SONG)
+
     return result
 
 # ---------------------------------------------------------------------------

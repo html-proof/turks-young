@@ -73,3 +73,31 @@ async def get_current_user(
         photo_url=claims.get("picture"),
         provider=firebase_claims.get("sign_in_provider"),
     )
+
+
+async def get_optional_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> AuthenticatedUser | None:
+    """Optionally authenticate a user from Firebase ID token, returning None for guest calls."""
+    if not credentials or credentials.scheme.lower() != "bearer" or not credentials.credentials:
+        return None
+    runtime = getattr(request.app.state, "firebase", None)
+    if not runtime or not runtime.enabled:
+        return None
+    try:
+        claims: dict[str, Any] = await runtime.verify_id_token(credentials.credentials)
+        uid = claims.get("uid") or claims.get("sub")
+        if not uid:
+            return None
+        firebase_claims = claims.get("firebase") or {}
+        return AuthenticatedUser(
+            uid=uid,
+            email=claims.get("email"),
+            display_name=claims.get("name"),
+            photo_url=claims.get("picture"),
+            provider=firebase_claims.get("sign_in_provider"),
+        )
+    except Exception:
+        return None
+

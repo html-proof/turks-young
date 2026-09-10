@@ -27,3 +27,6 @@ google-services.json
 
 # Flutter — excluded from this repo
 music_app/
+
+# Scratch scripts
+scratch/

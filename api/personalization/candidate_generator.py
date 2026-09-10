@@ -63,6 +63,8 @@ class CandidateGenerator:
 
         jobs: list[tuple[str, str, Any]] = []
 
+        search_fn = getattr(self.catalog, "search_candidates", self.catalog.search_songs)
+
         # 1. Favorite & Similar Artists (~150 candidates)
         # Sort artists by affinity, pick top 6 rotating with refresh_generation
         sorted_artists = sorted(profile.artists.items(), key=lambda x: x[1], reverse=True)
@@ -73,7 +75,7 @@ class CandidateGenerator:
                 jobs.append((
                     "favorite_artist",
                     f"Because you like {artist_name.title()}",
-                    self.catalog.search_songs(artist_name, 25),
+                    search_fn(artist_name, 25),
                 ))
 
         # 2. Preferred Languages (~100 candidates)
@@ -83,7 +85,7 @@ class CandidateGenerator:
             jobs.append((
                 "language_catalog",
                 f"Popular in {lang.title()}",
-                self.catalog.search_songs(f"{lang} hits", 30),
+                search_fn(f"{lang} hits", 30),
             ))
 
         # 3. Recent History & Song Similarity (~100 candidates)
@@ -102,7 +104,7 @@ class CandidateGenerator:
             jobs.append((
                 "song_similarity",
                 f"Because you played {title}",
-                self.catalog.search_songs(seed, 25),
+                search_fn(seed, 25),
             ))
 
         # 4. Session Query Intent (if active session searched something)
@@ -110,7 +112,7 @@ class CandidateGenerator:
             jobs.append((
                 "session_intent",
                 f"Related to your recent search '{session_query}'",
-                self.catalog.search_songs(session_query, 30),
+                search_fn(session_query, 30),
             ))
 
         # 5. Trending in Preferred Languages (~75 candidates)

@@ -235,10 +235,12 @@ def score_item(
     user_artists: list[str] | None = None,
     history_tracks: list[dict[str, Any]] | None = None,
     previous_searches: list[str] | None = None,
+    parsed_query: Any | None = None,
 ) -> tuple[RankingTier, int, list[str]]:
     """Evaluates ranking tier, 1000-point score, and explanation reasons.
 
     The Current Search Query is always the strongest ranking signal.
+    Hierarchy: Exact query intent -> Exact metadata match -> Prefix/token relevance -> Language/context -> Personal UUID taste -> Popularity -> Discovery
     Tiers:
     - Tier A: Exact normalized title, exact album/movie, exact artist, complete title+artist combined match
     - Tier B: Title starts with query, exact phrase in title, all query words present, transliteration, typo
@@ -249,7 +251,19 @@ def score_item(
     if not q:
         return RankingTier.TIER_D, 0, ["empty_query"]
 
+    if parsed_query is None:
+        try:
+            from api.catalog.search.parser import AdvancedQueryParser
+            parsed_query = AdvancedQueryParser.parse(query)
+        except Exception:
+            parsed_query = None
+
     clean_q, detected_lang = parse_query_language_and_core(q)
+    if parsed_query and parsed_query.free_text:
+        clean_q = normalize_query(parsed_query.free_text)
+    if parsed_query and parsed_query.language:
+        detected_lang = parsed_query.language
+
     core_tokens = _tokens(clean_q)
 
     title, artists, album_name = _text(item, kind)
@@ -444,8 +458,100 @@ def score_item(
             total_score += score_part
             reasons.append(f"weak_fuzzy +{score_part}")
 
+    # Exact quoted phrase matching (e.g. "nee kavithaigala")
+    if parsed_query and getattr(parsed_query, "is_exact_phrase", False) and getattr(parsed_query, "quoted_phrase", None):
+        qp = normalize_query(parsed_query.quoted_phrase)
+        if qp == norm_title or (clean_album and qp == clean_album):
+            tier = RankingTier.TIER_A
+            total_score += 250
+            reasons.append("exact_quoted_phrase_title_match +250")
+        elif qp in norm_title or (clean_album and qp in clean_album):
+            tier = min(tier, RankingTier.TIER_B)
+            total_score += 150
+            reasons.append("exact_quoted_phrase_inside +150")
+
     # --------------------------------------------------------------------------
-    # 2. Language Inference & Relevance
+    # Explicit Filter Evaluation (artist:, album:, year:, language:, genre:, mood:)
+    # --------------------------------------------------------------------------
+    if parsed_query:
+        # Artist filter (e.g. artist:Anirudh or artist:Vidyasagar)
+        f_artist = getattr(parsed_query, "artist", None) or getattr(parsed_query, "singer", None) or getattr(parsed_query, "composer", None)
+        if f_artist:
+            norm_f_art = normalize_query(f_artist)
+            if norm_f_art in norm_artists or norm_artists in norm_f_art:
+                total_score += 200
+                reasons.append(f"filter_artist_match({f_artist}) +200")
+            else:
+                total_score -= 400
+                reasons.append(f"filter_artist_mismatch({f_artist}) -400")
+
+        # Album / Movie filter (e.g. album:Premam or movie:Ghilli)
+        f_album = getattr(parsed_query, "album", None) or getattr(parsed_query, "movie", None)
+        if f_album:
+            norm_f_alb = normalize_query(f_album)
+            if (clean_album and (norm_f_alb in clean_album or clean_album in norm_f_alb)) or (norm_title and (norm_f_alb in norm_title or norm_title in norm_f_alb)):
+                total_score += 200
+                reasons.append(f"filter_album_match({f_album}) +200")
+            else:
+                total_score -= 400
+                reasons.append(f"filter_album_mismatch({f_album}) -400")
+
+        # Year Range filter (e.g. year:1990-1999 or "90s")
+        f_year_range = getattr(parsed_query, "year_range", None)
+        yr_val = item.get("year") or item.get("release_date")
+        cand_year = None
+        if yr_val:
+            try:
+                cand_year = int(str(yr_val)[:4])
+            except (ValueError, TypeError):
+                pass
+
+        if f_year_range:
+            y_start, y_end = f_year_range
+            if cand_year is not None:
+                if y_start <= cand_year <= y_end:
+                    total_score += 150
+                    reasons.append(f"filter_year_range_match({y_start}-{y_end}) +150")
+                else:
+                    total_score -= 300
+                    reasons.append(f"filter_year_range_mismatch({y_start}-{y_end} vs {cand_year}) -300")
+        elif getattr(parsed_query, "year", None) is not None:
+            f_yr = parsed_query.year
+            if cand_year is not None:
+                if cand_year == f_yr:
+                    total_score += 150
+                    reasons.append(f"filter_year_match({f_yr}) +150")
+                else:
+                    total_score -= 300
+                    reasons.append(f"filter_year_mismatch({f_yr} vs {cand_year}) -300")
+
+        # Language filter (e.g. language:tamil)
+        f_lang = getattr(parsed_query, "language", None)
+        if f_lang and item_lang:
+            if f_lang in item_lang or item_lang in f_lang:
+                total_score += 150
+                reasons.append(f"filter_language_match({f_lang}) +150")
+            else:
+                total_score -= 350
+                reasons.append(f"filter_language_mismatch({f_lang} vs {item_lang}) -350")
+
+        # Genre & Mood filter
+        f_genre = getattr(parsed_query, "genre", None)
+        if f_genre:
+            cand_g = normalize_query(str(item.get("genre") or item.get("genres") or item.get("tags") or ""))
+            if f_genre in cand_g or f_genre in norm_title or (clean_album and f_genre in clean_album):
+                total_score += 100
+                reasons.append(f"filter_genre_match({f_genre}) +100")
+
+        f_mood = getattr(parsed_query, "mood", None)
+        if f_mood:
+            cand_m = normalize_query(str(item.get("mood") or item.get("tags") or ""))
+            if f_mood in cand_m or f_mood in norm_title:
+                total_score += 80
+                reasons.append(f"filter_mood_match({f_mood}) +80")
+
+    # --------------------------------------------------------------------------
+    # 2. Query Language Relevance
     # --------------------------------------------------------------------------
     if detected_lang and item_lang:
         if detected_lang in item_lang or item_lang in detected_lang:
@@ -456,61 +562,62 @@ def score_item(
             reasons.append(f"query_language_mismatch({detected_lang} vs {item_lang}) -80")
 
     # --------------------------------------------------------------------------
-    # 3. Personalization & History Signals (Capped at <= 100 points, max 10%)
+    # 3. Personalization & History Signals (Strictly Bounded: Capped at <= 30 points)
+    # Exact Match and Text Relevance ALWAYS dominate. Personalization only breaks ties.
     # --------------------------------------------------------------------------
     personalization_pts = 0
-    # Preferred language (+80) — only applied as tie-breaker when explicit intent didn't contradict
-    if user_languages and item_lang and not detected_lang:
+    # Preferred language (+8 pts) — only applied as tie-breaker when query language was unspecified
+    if user_languages and item_lang and not detected_lang and not (parsed_query and getattr(parsed_query, "language", None)):
         if any(l.lower() in item_lang or item_lang in l.lower() for l in user_languages):
-            personalization_pts += 40
-            reasons.append("user_preferred_language +40")
+            personalization_pts += 8
+            reasons.append("user_preferred_language +8")
 
-    # Preferred artist (+60)
+    # Preferred artist (+12 pts)
     if user_artists and norm_artists:
         if any(normalize_query(a) in norm_artists or norm_artists in normalize_query(a) for a in user_artists):
-            personalization_pts += 30
-            reasons.append("user_preferred_artist +30")
+            personalization_pts += 12
+            reasons.append("user_preferred_artist +12")
 
-    # Listening history relevance (max +20)
+    # Listening history relevance (+5 pts)
     item_id = str(item.get("id") or item.get("track_id") or item.get("seokey") or "")
     if history_tracks and item_id:
         if any(str(h.get("id") or h.get("track_id") or h.get("seokey") or "") == item_id for h in history_tracks):
-            personalization_pts += 20
-            reasons.append("listening_history +20")
+            personalization_pts += 5
+            reasons.append("listening_history +5")
 
-    # Previous search relevance (max +10)
+    # Previous search relevance (+5 pts)
     if previous_searches and clean_q:
         if any(normalize_query(p) == clean_q for p in previous_searches):
-            personalization_pts += 10
-            reasons.append("previous_search +10")
+            personalization_pts += 5
+            reasons.append("previous_search +5")
 
-    # Hard cap on personalization: max 100 points
-    capped_personalization = min(personalization_pts, 100)
+    # Hard cap on personalization: max 30 points (max 3% contribution)
+    capped_personalization = min(personalization_pts, 30)
     total_score += capped_personalization
 
     # --------------------------------------------------------------------------
-    # 4. Secondary Signals: Popularity (+40) & Recency (+30)
+    # 4. Secondary Signals: Popularity (+4 pts max) & Recency (+3 pts max)
     # --------------------------------------------------------------------------
     popularity = item.get("popularity_score") or item.get("popularity") or 0
     try:
-        pop_pts = min(int(float(popularity) * 40.0), 40)
+        pop_pts = min(int(float(popularity) * 4.0), 4)
         if pop_pts > 0:
             total_score += pop_pts
             reasons.append(f"popularity +{pop_pts}")
     except (TypeError, ValueError):
         pass
 
-    # Recent release (+30)
+    # Recent release (+3 pts max)
     year = item.get("year") or item.get("release_date")
     if year:
         try:
             yr = int(str(year)[:4])
             if yr >= 2024:
-                total_score += 30
-                reasons.append("recent_release +30")
+                total_score += 3
+                reasons.append("recent_release +3")
             elif yr >= 2020:
-                total_score += 15
-                reasons.append("semi_recent_release +15")
+                total_score += 2
+                reasons.append("semi_recent_release +2")
         except (TypeError, ValueError):
             pass
 
@@ -640,17 +747,21 @@ def _word_match(query: str, item: dict[str, Any], kind: str) -> bool:
     return False
 
 
-def _semantic_fingerprint(item: dict[str, Any], kind: str) -> str:
+def canonical_song_key(item: dict[str, Any], kind: str) -> str:
+    """Generates a canonical identity key for deduplicating identical tracks across releases/providers."""
     title, artists, album_val = _text(item, kind)
     norm_t = normalize_query(title)
     primary_art = normalize_query(artists.split(",")[0] if artists else "")
     norm_al = normalize_query(album_val)
     dur = item.get("duration") or item.get("duration_seconds") or 0
     try:
-        dur_bucket = int(float(dur)) // 8
+        dur_bucket = round(float(dur) / 8.0)
     except (TypeError, ValueError):
         dur_bucket = 0
     return f"{norm_t}::{primary_art}::{norm_al}::{dur_bucket}"
+
+
+_semantic_fingerprint = canonical_song_key
 
 
 def rank(
@@ -662,6 +773,7 @@ def rank(
     user_artists: list[str] | None = None,
     history_tracks: list[dict[str, Any]] | None = None,
     previous_searches: list[str] | None = None,
+    parsed_query: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Deterministic ranking pipeline:
     1. Filter out broken / missing titles
@@ -671,6 +783,15 @@ def rank(
     5. Deterministically sort by: (tier, -score, starts_with_penalty, title_len, index)
     6. Return top subset up to limit
     """
+    if parsed_query is None:
+        try:
+            from api.catalog.search.parser import AdvancedQueryParser
+            parsed_query = AdvancedQueryParser.parse(query)
+        except Exception:
+            parsed_query = None
+
+    effective_q = parsed_query.free_text if (parsed_query and parsed_query.free_text) else query
+
     seen_ids: set[str] = set()
     fingerprint_map: dict[str, tuple[RankingTier, int, int, dict[str, Any]]] = {}
 
@@ -694,11 +815,12 @@ def rank(
             user_artists=user_artists,
             history_tracks=history_tracks,
             previous_searches=previous_searches,
+            parsed_query=parsed_query,
         )
         ranked_item["_search_score"] = item_score
         ranked_item["_search_tier"] = item_tier.value
 
-        fp = _semantic_fingerprint(ranked_item, kind)
+        fp = canonical_song_key(ranked_item, kind)
         if fp in fingerprint_map:
             prev_tier, prev_score, prev_idx, prev_item = fingerprint_map[fp]
             if item_tier < prev_tier or (item_tier == prev_tier and item_score > prev_score):
@@ -710,19 +832,25 @@ def rank(
     if not ranked:
         return []
 
+    # Filter out candidates with strong filter violations when valid matches exist
+    if parsed_query and parsed_query.filters:
+        non_negative = [item for item in ranked if item[1] > 0]
+        if non_negative:
+            ranked = non_negative
+
     # Progressive zero-result fallback / candidate filtering:
     # Pass 1 & 2: Exact word / prefix matches
-    word_matches = [item for item in ranked if _word_match(query, item[3], kind)]
+    word_matches = [item for item in ranked if _word_match(effective_q, item[3], kind)]
     if word_matches:
         ranked = word_matches
     else:
         # Pass 3 & 4: Strong transliteration / typo / fuzzy matches
-        strong = [item for item in ranked if _strong_match(query, item[3], kind)]
+        strong = [item for item in ranked if _strong_match(effective_q, item[3], kind)]
         if strong:
             ranked = strong
 
-    q_norm = normalize_query(query)
-    q_tokens = _tokens(query)
+    q_norm = normalize_query(effective_q)
+    q_tokens = _tokens(effective_q)
 
     # When kind is song and exact recording identities exist (exact title, exact album, or complete combined),
     # prioritize exact title recordings and matching soundtrack tracks while suppressing unrelated broad matches
