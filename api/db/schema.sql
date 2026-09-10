@@ -42,6 +42,19 @@ ALTER TABLE user_profiles
 ALTER TABLE user_profiles
   ADD COLUMN IF NOT EXISTS favorite_artist_ids TEXT[] NOT NULL DEFAULT '{}';
 
+CREATE TABLE IF NOT EXISTS user_audio_settings (
+  user_uuid TEXT PRIMARY KEY,
+  wifi_stream_quality INT NOT NULL DEFAULT 160,
+  mobile_stream_quality INT NOT NULL DEFAULT 96,
+  download_quality INT NOT NULL DEFAULT 160,
+  automatic_quality_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  data_saver_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  wifi_only_downloads BOOLEAN NOT NULL DEFAULT TRUE,
+  very_high_mobile_warning_acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_user_audio_settings_updated_at ON user_audio_settings(updated_at);
+
 CREATE TABLE IF NOT EXISTS user_favorites (
   uid          TEXT        NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
   seokey       TEXT        NOT NULL,

@@ -21,6 +21,7 @@ from api.personalization.models import (
     TrackSnapshot,
     UserPlaylistCreate,
     UserPlaylistUpdate,
+    UserAudioSettingsUpdate,
     SEO_KEY_PATTERN,
 )
 from api.personalization.repository import PostgresUserRepository as FirebaseUserRepository
@@ -628,3 +629,23 @@ async def delete_player_session(
 ) -> dict[str, bool]:
     await repository.delete_player_session(user.uid)
     return {"deleted": True}
+
+
+# ── Audio Quality & Streaming Settings (Section 25) ───────────────────────────
+
+@router.get("/audio-settings", summary="Get Spotify-style user audio quality and data settings.")
+async def get_audio_settings(
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    return await repository.get_audio_settings(user.uid)
+
+
+@router.put("/audio-settings", summary="Update Spotify-style user audio quality and data settings.")
+async def put_audio_settings(
+    data: UserAudioSettingsUpdate,
+    user: AuthenticatedUser = Depends(get_current_user),
+    repository: FirebaseUserRepository = Depends(get_user_repository),
+) -> dict[str, Any]:
+    return await repository.put_audio_settings(user.uid, data)
+

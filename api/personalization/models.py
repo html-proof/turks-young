@@ -427,6 +427,30 @@ class PlayerSessionUpdate(BaseModel):
     device_id: str | None = Field(default=None, max_length=200)
 
 
+class UserAudioSettings(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    user_uuid: str = ""
+    wifi_stream_quality: int = 160
+    mobile_stream_quality: int = 96
+    download_quality: int = 160
+    automatic_quality_enabled: bool = True
+    data_saver_enabled: bool = False
+    wifi_only_downloads: bool = True
+    very_high_mobile_warning_acknowledged: bool = False
+    updated_at: str | None = None
+
+
+class UserAudioSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    wifi_stream_quality: int | None = Field(default=None, ge=24, le=320)
+    mobile_stream_quality: int | None = Field(default=None, ge=24, le=320)
+    download_quality: int | None = Field(default=None, ge=24, le=320)
+    automatic_quality_enabled: bool | None = None
+    data_saver_enabled: bool | None = None
+    wifi_only_downloads: bool | None = None
+    very_high_mobile_warning_acknowledged: bool | None = None
+
+
 class PreferenceIds(BaseModel):
     """IDs submitted by onboarding/settings; identity comes from the token."""
     language_ids: list[str] | None = Field(default=None, min_length=1, max_length=20)

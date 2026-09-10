@@ -23,6 +23,7 @@ from api.personalization.models import (
     TrackSnapshot,
     UserPlaylistCreate,
     UserPlaylistUpdate,
+    UserAudioSettingsUpdate,
     clean_album_or_title,
 )
 
@@ -1407,6 +1408,72 @@ class PostgresUserRepository:
                 "DELETE FROM player_sessions WHERE uid = $1", uid,
             )
         return result == "DELETE 1"
+
+    async def get_audio_settings(self, user_uuid: str) -> dict[str, Any]:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_uuid, wifi_stream_quality, mobile_stream_quality, download_quality, "
+                "automatic_quality_enabled, data_saver_enabled, wifi_only_downloads, "
+                "very_high_mobile_warning_acknowledged, updated_at "
+                "FROM user_audio_settings WHERE user_uuid = $1",
+                user_uuid,
+            )
+        if row is None:
+            return {
+                "user_uuid": user_uuid,
+                "wifi_stream_quality": 160,
+                "mobile_stream_quality": 96,
+                "download_quality": 160,
+                "automatic_quality_enabled": True,
+                "data_saver_enabled": False,
+                "wifi_only_downloads": True,
+                "very_high_mobile_warning_acknowledged": False,
+                "updated_at": None,
+            }
+        return {
+            "user_uuid": row["user_uuid"],
+            "wifi_stream_quality": row["wifi_stream_quality"],
+            "mobile_stream_quality": row["mobile_stream_quality"],
+            "download_quality": row["download_quality"],
+            "automatic_quality_enabled": row["automatic_quality_enabled"],
+            "data_saver_enabled": row["data_saver_enabled"],
+            "wifi_only_downloads": row["wifi_only_downloads"],
+            "very_high_mobile_warning_acknowledged": row["very_high_mobile_warning_acknowledged"],
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+
+    async def put_audio_settings(self, user_uuid: str, update: UserAudioSettingsUpdate) -> dict[str, Any]:
+        current = await self.get_audio_settings(user_uuid)
+        changes = update.model_dump(exclude_unset=True)
+        wifi_q = changes.get("wifi_stream_quality", current["wifi_stream_quality"])
+        mob_q = changes.get("mobile_stream_quality", current["mobile_stream_quality"])
+        dl_q = changes.get("download_quality", current["download_quality"])
+        auto_q = changes.get("automatic_quality_enabled", current["automatic_quality_enabled"])
+        ds_enabled = changes.get("data_saver_enabled", current["data_saver_enabled"])
+        wifi_dl = changes.get("wifi_only_downloads", current["wifi_only_downloads"])
+        warn_ack = changes.get("very_high_mobile_warning_acknowledged", current["very_high_mobile_warning_acknowledged"])
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO user_audio_settings (user_uuid, wifi_stream_quality, mobile_stream_quality, download_quality, "
+                "automatic_quality_enabled, data_saver_enabled, wifi_only_downloads, very_high_mobile_warning_acknowledged, updated_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) "
+                "ON CONFLICT (user_uuid) DO UPDATE SET wifi_stream_quality = $2, mobile_stream_quality = $3, download_quality = $4, "
+                "automatic_quality_enabled = $5, data_saver_enabled = $6, wifi_only_downloads = $7, very_high_mobile_warning_acknowledged = $8, updated_at = now() "
+                "RETURNING user_uuid, wifi_stream_quality, mobile_stream_quality, download_quality, automatic_quality_enabled, data_saver_enabled, wifi_only_downloads, very_high_mobile_warning_acknowledged, updated_at",
+                user_uuid, wifi_q, mob_q, dl_q, auto_q, ds_enabled, wifi_dl, warn_ack,
+            )
+        return {
+            "user_uuid": row["user_uuid"],
+            "wifi_stream_quality": row["wifi_stream_quality"],
+            "mobile_stream_quality": row["mobile_stream_quality"],
+            "download_quality": row["download_quality"],
+            "automatic_quality_enabled": row["automatic_quality_enabled"],
+            "data_saver_enabled": row["data_saver_enabled"],
+            "wifi_only_downloads": row["wifi_only_downloads"],
+            "very_high_mobile_warning_acknowledged": row["very_high_mobile_warning_acknowledged"],
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
 
     _SNAPSHOT_TABLES: dict[str, tuple[str, str]] = {
         "user_followed_artists": ("artist", "followed_at"),
