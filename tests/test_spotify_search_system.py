@@ -264,3 +264,70 @@ async def test_service_with_authenticated_user_uuid_personalization():
     # Perform search with user_uid
     res = await service.search("Malare", None, 1, 20, user_uid="user-test-uuid")
     assert res["songs"][0]["title"] == "Malare"
+
+
+@pytest.mark.asyncio
+async def test_parallel_provider_deduplication_prefers_playable_stream():
+    """Rule 18 & 20: When Gaana and JioSaavn return the same song, collapse to
+    a single canonical entry and pick the one with the valid playable stream URL.
+    """
+    gaana_track = {
+        "id": "100",
+        "title": "Why This Kolaveri Di",
+        "artists": [{"name": "Dhanush"}, {"name": "Anirudh"}],
+        "album": "3",
+        "duration": "250",
+        "stream_url": None,
+    }
+    saavn_track = {
+        "id": "saavn:200",
+        "title": "Why This Kolaveri Di",
+        "artists": [{"name": "Dhanush"}, {"name": "Anirudh"}],
+        "album": "3",
+        "duration": "252",
+        "stream_url": "https://aac.saavncdn.com/stream_320.mp4",
+    }
+
+    # Both share the same canonical key
+    assert canonical_song_key(gaana_track, "song") == canonical_song_key(saavn_track, "song")
+
+    ranked = rank("Why This Kolaveri Di", [gaana_track, saavn_track], "song", 10)
+    assert len(ranked) == 1
+    # Entry with stream_url should be selected
+    assert ranked[0]["stream_url"] == "https://aac.saavncdn.com/stream_320.mp4"
+
+
+@pytest.mark.asyncio
+async def test_soundtrack_expansion_lightweight_no_waterfall():
+    """Rule 6 & 19: Soundtrack expansion must extract tracks from album payload
+    with fetch_missing_tracks=False and not fail or throw TimeoutError.
+    """
+    catalog = AsyncMock()
+    catalog.search_songs = AsyncMock(return_value=[])
+    catalog.search_artists = AsyncMock(return_value=[])
+    catalog.search_albums = AsyncMock(return_value=[
+        {"id": "ghilli-soundtrack", "title": "Ghilli", "language": "tamil"}
+    ])
+    catalog.search_playlists = AsyncMock(return_value=[])
+    catalog.get_album_info = AsyncMock(return_value=[
+        {
+            "id": "ghilli-soundtrack",
+            "title": "Ghilli",
+            "tracks": [
+                {"track_id": "t1", "seokey": "appadi-podu", "title": "Appadi Podu", "artist": "Vidyasagar"},
+                {"track_id": "t2", "seokey": "arjunar-villu", "title": "Arjunar Villu", "artist": "Vidyasagar"},
+            ],
+        }
+    ])
+
+    service = CatalogService(catalog, LanguageCatalog.from_json("[]"))
+    res = await service.search("Ghilli", None, 1, 20)
+
+    # Should expand soundtrack tracks into songs without error
+    assert "songs" in res
+    assert len(res["songs"]) >= 2
+    titles = [s["title"] for s in res["songs"]]
+    assert "Appadi Podu" in titles
+    assert "Arjunar Villu" in titles
+    # Confirm get_album_info was called with fetch_missing_tracks=False
+    catalog.get_album_info.assert_called_with(["ghilli-soundtrack"], True, fetch_missing_tracks=False)

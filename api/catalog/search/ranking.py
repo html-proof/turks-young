@@ -634,6 +634,12 @@ def score_item(
         total_score += 15
         reasons.append("metadata_confidence +15")
 
+    # Playable stream signal (+15)
+    has_stream = bool(item.get("stream_url") or (isinstance(item.get("stream_urls"), dict) and item["stream_urls"].get("urls")))
+    if has_stream:
+        total_score += 15
+        reasons.append("playable_stream +15")
+
     # --------------------------------------------------------------------------
     # 5. Unofficial Noise Penalty (-400)
     # --------------------------------------------------------------------------
@@ -755,7 +761,7 @@ def canonical_song_key(item: dict[str, Any], kind: str) -> str:
     norm_al = normalize_query(album_val)
     dur = item.get("duration") or item.get("duration_seconds") or 0
     try:
-        dur_bucket = round(float(dur) / 8.0)
+        dur_bucket = round(float(dur) / 10.0)
     except (TypeError, ValueError):
         dur_bucket = 0
     return f"{norm_t}::{primary_art}::{norm_al}::{dur_bucket}"
@@ -823,7 +829,13 @@ def rank(
         fp = canonical_song_key(ranked_item, kind)
         if fp in fingerprint_map:
             prev_tier, prev_score, prev_idx, prev_item = fingerprint_map[fp]
-            if item_tier < prev_tier or (item_tier == prev_tier and item_score > prev_score):
+            new_has_stream = bool(ranked_item.get("stream_url"))
+            prev_has_stream = bool(prev_item.get("stream_url"))
+            if (
+                item_tier < prev_tier
+                or (item_tier == prev_tier and item_score > prev_score)
+                or (item_tier == prev_tier and item_score == prev_score and new_has_stream and not prev_has_stream)
+            ):
                 fingerprint_map[fp] = (item_tier, item_score, index, ranked_item)
         else:
             fingerprint_map[fp] = (item_tier, item_score, index, ranked_item)

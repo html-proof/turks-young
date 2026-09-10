@@ -18,4 +18,6 @@ class LyricsResponse(BaseModel):
     instrumental: bool
     plainLyrics: str | None = None
     lines: list[LyricLine] = Field(default_factory=list)
+    verified: bool = False
+    verificationScore: int = 0
 

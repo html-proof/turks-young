@@ -40,7 +40,7 @@ class Albums:
         album_info = await self.get_album_info(album_ids, False)
         return album_info
 
-    async def get_album_info(self, album_id: list, info: bool) -> list:
+    async def get_album_info(self, album_id: list, info: bool, fetch_missing_tracks: bool = True) -> list:
         endpoints = self.api_endpoints
         errors = self.errors
         results = await asyncio.gather(*[
@@ -51,12 +51,12 @@ class Albums:
         for result in results:
             if isinstance(result, dict) and "error" in result:
                 continue
-            album_info.append(await self.format_json_albums(result, info=info))
+            album_info.append(await self.format_json_albums(result, info=info, fetch_missing_tracks=fetch_missing_tracks))
         if len(album_info) == 0:
             return await errors.no_results()
         return album_info
 
-    async def get_album_tracks(self, album_id: str, raw_tracks: list = None, album_meta: dict = None) -> list:
+    async def get_album_tracks(self, album_id: str, raw_tracks: list = None, album_meta: dict = None, fetch_missing: bool = True) -> list:
         if raw_tracks is None:
             endpoints = self.api_endpoints
             result = await self._safe_request("POST", endpoints.album_details_url + album_id)
@@ -81,8 +81,24 @@ class Albums:
                         formatted = await self.format_json_songs(t)
                         if isinstance(formatted, dict) and 'error' not in formatted:
                             formatted_tracks.append(formatted)
+                    elif not fetch_missing:
+                        title = t.get('track_title') or t.get('title') or t.get('name') or ''
+                        if title:
+                            formatted_tracks.append({
+                                'track_id': str(t.get('track_id') or t.get('id') or ''),
+                                'seokey': t.get('seokey') or str(t.get('track_id') or ''),
+                                'title': title,
+                                'album': album_meta.get('title') if album_meta else '',
+                                'album_seokey': album_meta.get('seokey') if album_meta else '',
+                                'duration': t.get('duration', ''),
+                                'artist': t.get('artist') or t.get('artists') or '',
+                                'artwork': album_meta.get('artwork') if album_meta else '',
+                            })
             if formatted_tracks:
                 return formatted_tracks
+
+        if not fetch_missing:
+            return []
 
         track_seokeys = []
         for i in raw_tracks:
@@ -95,7 +111,7 @@ class Albums:
                 return result
         return []
 
-    async def format_json_albums(self, results: dict, info: bool = False) -> dict:
+    async def format_json_albums(self, results: dict, info: bool = False, fetch_missing_tracks: bool = True) -> dict:
         functions = self.functions
         errors = self.errors
         data = {}
@@ -138,5 +154,5 @@ class Albums:
 
         if info:
             raw_tracks = results.get('tracks') or (album.get('tracks') if isinstance(album, dict) else None) or []
-            data['tracks'] = await self.get_album_tracks(data['seokey'], raw_tracks=raw_tracks, album_meta=album)
+            data['tracks'] = await self.get_album_tracks(data['seokey'], raw_tracks=raw_tracks, album_meta=album, fetch_missing=fetch_missing_tracks)
         return data

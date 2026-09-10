@@ -19,7 +19,7 @@ class Artists:
         artist_info = await self.get_artist_info(artist_ids, False)
         return artist_info
 
-    async def get_artist_info(self, artist_id: list, info: bool, limit: int = 10, page: int = 1) -> list:
+    async def get_artist_info(self, artist_id: list, info: bool, limit: int = 10, page: int = 1, fetch_missing_tracks: bool = True) -> list:
         endpoints = self.api_endpoints
         errors = self.errors
         results = await asyncio.gather(*[
@@ -30,17 +30,17 @@ class Artists:
         for result in results:
             if isinstance(result, dict) and "error" in result:
                 continue
-            artist_info.append(await self.format_json_artists(result, limit, page, info=info))
+            artist_info.append(await self.format_json_artists(result, limit, page, info=info, fetch_missing_tracks=fetch_missing_tracks))
         if len(artist_info) == 0:
             return await errors.no_results()
         return artist_info
 
-    async def get_top_tracks(self, artist_id: str, limit: int = 10, page: int = 1) -> dict:
+    async def get_top_tracks(self, artist_id: str, limit: int = 10, page: int = 1, fetch_missing_tracks: bool = True) -> dict:
         endpoints = self.api_endpoints
         raw_id = str(artist_id).strip()
         if not raw_id.isdigit():
             # artist_id is a seokey slug; resolve via get_artist_info
-            info = await self.get_artist_info([raw_id], True, limit, page)
+            info = await self.get_artist_info([raw_id], True, limit, page, fetch_missing_tracks=fetch_missing_tracks)
             if isinstance(info, list) and info and isinstance(info[0], dict):
                 tracks = info[0].get('top_tracks', [])
                 total = info[0].get('total_tracks', len(tracks))
@@ -50,7 +50,7 @@ class Artists:
         result = await self._safe_request("POST", endpoints.artist_top_tracks + raw_id)
         if isinstance(result, dict) and "error" in result:
             # Fallback to get_artist_info if top_tracks endpoint returned error
-            info = await self.get_artist_info([raw_id], True, limit, page)
+            info = await self.get_artist_info([raw_id], True, limit, page, fetch_missing_tracks=fetch_missing_tracks)
             if isinstance(info, list) and info and isinstance(info[0], dict):
                 tracks = info[0].get('top_tracks', [])
                 total = info[0].get('total_tracks', len(tracks))
@@ -58,13 +58,31 @@ class Artists:
             return {"tracks": [], "total": 0}
 
         track_seokeys = []
-        for track in result.get('entities', []):
+        raw_entities = result.get('entities', [])
+        for track in raw_entities:
             seo = track.get('seokey') if isinstance(track, dict) else None
             if seo:
                 track_seokeys.append(seo)
         total = len(track_seokeys)
         offset = (page - 1) * limit
         paginated_seokeys = track_seokeys[offset:offset + limit]
+
+        if not fetch_missing_tracks and raw_entities:
+            lightweight = []
+            for track in raw_entities[offset:offset + limit]:
+                if isinstance(track, dict):
+                    t_title = track.get('title') or track.get('name') or track.get('track_title') or ''
+                    if t_title:
+                        lightweight.append({
+                            'track_id': str(track.get('entity_id') or track.get('track_id') or track.get('id') or ''),
+                            'seokey': track.get('seokey') or '',
+                            'title': t_title,
+                            'artist': track.get('artist') or '',
+                            'artwork': track.get('atw') or '',
+                        })
+            if lightweight:
+                return {"tracks": lightweight, "total": total}
+
         tracks = await self.get_track_info(paginated_seokeys)
         if isinstance(tracks, dict) and "error" in tracks:
             return {"tracks": [], "total": total}
@@ -86,7 +104,7 @@ class Artists:
         similar_artists.extend(await asyncio.gather(*[self.format_json_similar_artists(entity) for entity in entities]))
         return similar_artists
 
-    async def format_json_artists(self, results: dict, limit: int = 10, page: int = 1, info: bool = False) -> dict:
+    async def format_json_artists(self, results: dict, limit: int = 10, page: int = 1, info: bool = False, fetch_missing_tracks: bool = True) -> dict:
         errors = self.errors
         data = {}
 
@@ -114,7 +132,7 @@ class Artists:
         data['images']['urls']['small_artwork'] = atw
         data['artist_image'] = large_atw or atw
         if info:
-            top_tracks_data = await self.get_top_tracks(data['artist_id'], limit, page)
+            top_tracks_data = await self.get_top_tracks(data['artist_id'], limit, page, fetch_missing_tracks=fetch_missing_tracks)
             data['top_tracks'] = top_tracks_data.get('tracks', [])
             data['total_tracks'] = top_tracks_data.get('total', 0)
         return data

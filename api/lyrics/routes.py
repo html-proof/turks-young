@@ -17,6 +17,10 @@ async def _lyrics_for_track(
     track_id: str,
     title: str | None = None,
     artist: str | None = None,
+    album: str | None = None,
+    duration: int | None = None,
+    language: str | None = None,
+    isrc: str | None = None,
 ):
     cache = getattr(request.app.state, "cache", None)
     cache_key = f"songs:info:{track_id}"
@@ -38,17 +42,27 @@ async def _lyrics_for_track(
             "seokey": track_id,
             "title": title or track_id.replace("-", " ").title(),
             "artists": artist or "",
-            "album": "",
-            "duration": 0,
+            "album": album or "",
+            "duration": duration or 0,
+            "language": language or "",
+            "isrc": isrc or "",
         }
 
     if not track_data:
         raise HTTPException(status_code=404, detail="Track not found")
 
-    if title and not track_data.get("title"):
+    if title:
         track_data["title"] = title
-    if artist and not (track_data.get("artists") or track_data.get("artist")):
+    if artist:
         track_data["artists"] = artist
+    if album:
+        track_data["album"] = album
+    if duration:
+        track_data["duration"] = duration
+    if language:
+        track_data["language"] = language
+    if isrc:
+        track_data["isrc"] = isrc
 
     try:
         return await request.app.state.lyrics_service.get_lyrics(track_data)
@@ -71,6 +85,8 @@ async def _lyrics_for_track(
             "instrumental": False,
             "plainLyrics": None,
             "lines": [],
+            "verified": False,
+            "verificationScore": 0,
         }
         if cache:
             try:
@@ -90,8 +106,21 @@ async def get_track_lyrics(
     track_id: str = Path(..., min_length=1, max_length=200, pattern=SEO_KEY),
     title: str | None = None,
     artist: str | None = None,
+    album: str | None = None,
+    duration: int | None = None,
+    language: str | None = None,
+    isrc: str | None = None,
 ):
-    return await _lyrics_for_track(request, track_id, title=title, artist=artist)
+    return await _lyrics_for_track(
+        request,
+        track_id,
+        title=title,
+        artist=artist,
+        album=album,
+        duration=duration,
+        language=language,
+        isrc=isrc,
+    )
 
 
 @router.get(
@@ -104,5 +133,18 @@ async def get_track_lyrics_legacy(
     track_id: str = Path(..., min_length=1, max_length=200, pattern=SEO_KEY),
     title: str | None = None,
     artist: str | None = None,
+    album: str | None = None,
+    duration: int | None = None,
+    language: str | None = None,
+    isrc: str | None = None,
 ):
-    return await _lyrics_for_track(request, track_id, title=title, artist=artist)
+    return await _lyrics_for_track(
+        request,
+        track_id,
+        title=title,
+        artist=artist,
+        album=album,
+        duration=duration,
+        language=language,
+        isrc=isrc,
+    )
