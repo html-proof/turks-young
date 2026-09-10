@@ -140,8 +140,8 @@ class Songs:
                         else base_url
                     )
                     data['stream_urls']['urls']['low_quality'] = (
-                        base_clean.format(bitrate="16") if "{bitrate}.mp4" in base_clean
-                        else base_url.replace("64.mp4", "16.mp4").replace("128.mp4", "16.mp4")
+                        base_clean.format(bitrate="64") if "{bitrate}.mp4" in base_clean
+                        else base_url.replace("128.mp4", "64.mp4")
                     )
                 else:
                     raise KeyError

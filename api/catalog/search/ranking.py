@@ -18,6 +18,34 @@ KNOWN_LANGUAGES = {
     "odia", "assamese",
 }
 
+LANGUAGE_CONNECTORS = {
+    "in", "from", "of", "songs", "song", "movie", "film", "soundtrack",
+    "track", "tracks", "hits", "audio", "album",
+}
+
+
+def parse_query_language_and_core(raw_query: str) -> tuple[str, str | None]:
+    norm = normalize_query(raw_query)
+    if not norm:
+        return "", None
+    tokens = norm.split()
+    detected_lang = None
+    remaining_tokens = []
+    for token in tokens:
+        if token in KNOWN_LANGUAGES and not detected_lang:
+            detected_lang = token
+        else:
+            remaining_tokens.append(token)
+
+    core_tokens = []
+    for token in remaining_tokens:
+        if detected_lang and token in LANGUAGE_CONNECTORS:
+            continue
+        core_tokens.append(token)
+
+    clean_q = " ".join(core_tokens).strip()
+    return (clean_q if clean_q else norm, detected_lang)
+
 _UNOFFICIAL_NOISE = re.compile(
     r"\b(?:cover|karaoke|instrumental|reverb|lo-?fi|slowed|ringtone|status|dj remix|tribute|short|dialogue promo|whatsapp status)\b",
     re.I,
@@ -221,15 +249,8 @@ def score_item(
     if not q:
         return RankingTier.TIER_D, 0, ["empty_query"]
 
-    q_tokens = _tokens(q)
-    detected_lang = None
-    core_tokens = []
-    for token in q_tokens:
-        if token in KNOWN_LANGUAGES and not detected_lang:
-            detected_lang = token
-        else:
-            core_tokens.append(token)
-    clean_q = " ".join(core_tokens) if core_tokens else q
+    clean_q, detected_lang = parse_query_language_and_core(q)
+    core_tokens = _tokens(clean_q)
 
     title, artists, album_name = _text(item, kind)
     norm_title = normalize_query(title)
@@ -237,6 +258,11 @@ def score_item(
     norm_album = normalize_query(album_name)
     clean_album = _OST_KEYWORDS.sub("", norm_album).strip()
     item_lang = str(item.get("language") or item.get("lang") or "").lower().strip()
+
+    raw_title_core = title.split(" - ")[0].strip() if " - " in title else title.split(":")[0].strip()
+    raw_album_core = album_name.split(" - ")[0].strip() if " - " in album_name else album_name.split(":")[0].strip()
+    norm_title_core = normalize_query(raw_title_core)
+    norm_album_core = normalize_query(raw_album_core)
 
     reasons: list[str] = []
     tier = RankingTier.TIER_D
@@ -280,14 +306,24 @@ def score_item(
             reasons.append(f"fuzzy_similarity +{score_part}")
 
     elif kind == "album":
-        if norm_title == clean_q or (clean_album and clean_album == clean_q):
+        is_exact_album = (
+            norm_title == clean_q
+            or (clean_album and clean_album == clean_q)
+            or (raw_title_core != title and norm_title_core == clean_q)
+            or (clean_album and raw_album_core != album_name and norm_album_core == clean_q)
+        )
+        if is_exact_album:
             tier = RankingTier.TIER_A
             total_score += 500 + 320 + 130  # = 950
             reasons.append("exact_album_match +950")
-        elif norm_title.startswith(clean_q + " ") or (clean_album and clean_album.startswith(clean_q + " ")) or norm_title.startswith(clean_q) or (clean_album and clean_album.startswith(clean_q)):
+        elif norm_title.startswith(clean_q + " ") or (clean_album and clean_album.startswith(clean_q + " ")):
             tier = RankingTier.TIER_B
-            total_score += 420 + 320 + 110  # = 850
-            reasons.append("album_starts_with_query +850")
+            total_score += 450 + 320 + 110  # = 880 (whole-word prefix)
+            reasons.append("album_starts_with_word +880")
+        elif norm_title.startswith(clean_q) or (clean_album and clean_album.startswith(clean_q)):
+            tier = RankingTier.TIER_B
+            total_score += 380 + 320 + 100  # = 800 (substring prefix)
+            reasons.append("album_starts_with_prefix +800")
         elif any(t == clean_q or t.startswith(clean_q) for t in title_tokens):
             tier = RankingTier.TIER_B
             total_score += 280 + 240 + 230  # = 750
@@ -331,6 +367,10 @@ def score_item(
             and artist_hits
             and len(all_hits) == len(set(core_tokens))
         )
+        is_exact_album = (
+            (clean_album and clean_album == clean_q)
+            or (clean_album and raw_album_core != album_name and norm_album_core == clean_q)
+        )
 
         if is_complete_combined:
             tier = RankingTier.TIER_A
@@ -340,7 +380,7 @@ def score_item(
             tier = RankingTier.TIER_A
             total_score += 1000  # Exact title match
             reasons.append("exact_normalized_title +1000")
-        elif clean_album and clean_album == clean_q:
+        elif is_exact_album:
             tier = RankingTier.TIER_A
             total_score += 950   # Exact album / soundtrack match
             reasons.append("exact_album_movie +950")
@@ -692,6 +732,7 @@ def rank(
             if (
                 normalize_query(str(item[3].get("title") or item[3].get("name") or "")) == q_norm
                 or _OST_KEYWORDS.sub("", normalize_query(str(item[3].get("album") or ""))).strip() == q_norm
+                or (item[3].get("album") and _OST_KEYWORDS.sub("", normalize_query(str(item[3].get("album") or ""))).strip().split(" - ")[0].strip() == q_norm)
                 or (
                     len(q_tokens) > 1
                     and _matched_query_tokens(q_tokens, normalize_query(str(item[3].get("title") or "")))
@@ -706,6 +747,7 @@ def rank(
                 if (
                     item in exact_title_or_album_recordings
                     or _OST_KEYWORDS.sub("", normalize_query(str(item[3].get("album") or ""))).strip() == q_norm
+                    or (item[3].get("album") and _OST_KEYWORDS.sub("", normalize_query(str(item[3].get("album") or ""))).strip().split(" - ")[0].strip() == q_norm)
                 )
                 and not _UNOFFICIAL_NOISE.search(str(item[3].get("title") or ""))
             ]
@@ -713,13 +755,15 @@ def rank(
     # Multi-tier deterministic sort:
     # 1. Tier ascending (Tier A = 1, Tier B = 2, Tier C = 3, Tier D = 4)
     # 2. Score descending (-score)
-    # 3. Starts with query (True before False)
-    # 4. Length of title ascending (shorter more exact title wins)
-    # 5. Original index for stability
+    # 3. Contains exact whole word token (True before False)
+    # 4. Starts with query (True before False)
+    # 5. Length of title ascending (shorter more exact title wins)
+    # 6. Original index for stability
     ranked.sort(
         key=lambda v: (
             v[0].value,
             -v[1],
+            not any(tok == q_norm for tok in _tokens(str(v[3].get("title") or v[3].get("name") or ""))),
             not normalize_query(str(v[3].get("title") or v[3].get("name") or "")).startswith(q_norm),
             len(str(v[3].get("title") or v[3].get("name") or "")),
             v[2],

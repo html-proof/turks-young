@@ -749,3 +749,35 @@ def test_artist_cleanup_of_stringified_type_artist_noise_and_slugs():
     assert norm2["artists"][1]["id"] == "sujatha"
 
 
+def test_parse_query_language_and_core_and_cia_ranking():
+    from api.catalog.search.ranking import parse_query_language_and_core, score_item, RankingTier
+
+    clean, lang = parse_query_language_and_core("CIA in malayalam")
+    assert clean == "cia"
+    assert lang == "malayalam"
+
+    clean2, lang2 = parse_query_language_and_core("premam malayalam songs")
+    assert clean2 == "premam"
+    assert lang2 == "malayalam"
+
+    cia_album = {
+        "id": "alb_cia",
+        "title": "CIA - Comrade In America",
+        "language": "malayalam",
+    }
+    tier, score, _ = score_item("CIA in malayalam", cia_album, "album")
+    assert tier == RankingTier.TIER_A
+    assert score >= 950
+
+    cia_song = {
+        "id": "song_kannil",
+        "title": "Kannil Kannil",
+        "album": "CIA - Comrade In America",
+        "language": "malayalam",
+    }
+    tier_s, score_s, _ = score_item("CIA in malayalam", cia_song, "song")
+    assert tier_s == RankingTier.TIER_A
+    assert score_s >= 950
+
+
+
