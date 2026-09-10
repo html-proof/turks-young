@@ -780,4 +780,26 @@ def test_parse_query_language_and_core_and_cia_ranking():
     assert score_s >= 950
 
 
+@pytest.mark.asyncio
+async def test_redis_cache_eval_loader_handles_sync_and_async_loaders():
+    from api.cache.redis_cache import RedisCache
+
+    # 1. Sync lambda returning dict (the exact bug reported in /api/languages)
+    sync_loader = lambda: {"items": [{"id": "hindi", "name": "Hindi"}]}
+    res1 = await RedisCache._eval_loader(sync_loader)
+    assert res1 == {"items": [{"id": "hindi", "name": "Hindi"}]}
+
+    # 2. Async loader returning dict
+    async def async_loader():
+        return {"items": [{"id": "malayalam", "name": "Malayalam"}]}
+    res2 = await RedisCache._eval_loader(async_loader)
+    assert res2 == {"items": [{"id": "malayalam", "name": "Malayalam"}]}
+
+    # 3. Direct non-callable value
+    raw_val = {"items": []}
+    res3 = await RedisCache._eval_loader(raw_val)
+    assert res3 == {"items": []}
+
+
+
 
