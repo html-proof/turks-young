@@ -136,8 +136,8 @@ class Songs:
                         else base_url.replace("64.mp4", "128.mp4").replace("320.mp4", "128.mp4")
                     )
                     data['stream_urls']['urls']['medium_quality'] = (
-                        base_clean.format(bitrate="64") if "{bitrate}.mp4" in base_clean
-                        else base_url.replace("320.mp4", "64.mp4").replace("128.mp4", "64.mp4")
+                        base_clean.format(bitrate="128") if "{bitrate}.mp4" in base_clean
+                        else base_url.replace("64.mp4", "128.mp4").replace("320.mp4", "128.mp4")
                     )
                     data['stream_urls']['urls']['low_quality'] = (
                         base_clean.format(bitrate="64") if "{bitrate}.mp4" in base_clean
