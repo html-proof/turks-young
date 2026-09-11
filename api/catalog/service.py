@@ -1153,20 +1153,50 @@ class CatalogService:
 
     async def album_details(self, album_id: str) -> dict[str, Any] | None:
         normalized_album = None
-        try:
-            result = _clean(await self.catalog.get_album_info([album_id], True))
-            if isinstance(result, list) and result:
-                normalized_album = album(result[0])
-                if (normalized_album.get("id") or normalized_album.get("provider_id")) and normalized_album.get("name"):
-                    tracks = normalized_album.get("tracks") or normalized_album.get("songs") or []
-                    if tracks:
-                        logger.info(
-                            "album_details album_id=%s provider_count=%d track_count=%d",
-                            album_id, len(result), len(tracks),
-                        )
-                        return normalized_album
-        except Exception:
-            logger.exception("album_details provider_failure album_id=%s", album_id)
+        merged_tracks: list[dict[str, Any]] = []
+        seen_tracks: set[str] = set()
+        expected_count = 0
+        # A provider can return a valid but incomplete first body. Retry the
+        # same canonical album ID and merge tracks; never call title search to
+        # fill an album because that can attach the wrong recording.
+        for attempt in range(3):
+            try:
+                result = _clean(await self.catalog.get_album_info([album_id], True))
+                if not isinstance(result, list) or not result:
+                    continue
+                candidate = album(result[0])
+                if not ((candidate.get("id") or candidate.get("provider_id")) and candidate.get("name")):
+                    continue
+                normalized_album = candidate
+                expected_count = max(expected_count, int(candidate.get("trackCount") or candidate.get("song_count") or candidate.get("track_count") or 0))
+                for track in candidate.get("tracks") or candidate.get("songs") or []:
+                    key = str(track.get("track_id") or track.get("provider_id") or track.get("id") or track.get("seokey") or "").strip().lower()
+                    if not key:
+                        key = f"{str(track.get('title') or '').strip().lower()}|{str(track.get('artist') or '').strip().lower()}"
+                    if key and key not in seen_tracks:
+                        seen_tracks.add(key)
+                        merged_tracks.append(track)
+                if expected_count <= 0 or len(merged_tracks) >= expected_count:
+                    break
+                await asyncio.sleep(0.25 * (attempt + 1))
+            except Exception:
+                logger.exception("album_details provider_failure album_id=%s attempt=%d", album_id, attempt + 1)
+
+        if normalized_album and merged_tracks:
+            normalized_album["tracks"] = merged_tracks
+            normalized_album["songs"] = merged_tracks
+            normalized_album["expected_track_count"] = expected_count or len(merged_tracks)
+            normalized_album["loaded_track_count"] = len(merged_tracks)
+            normalized_album["is_complete"] = expected_count <= 0 or len(merged_tracks) >= expected_count
+            normalized_album["has_more"] = not normalized_album["is_complete"]
+            if normalized_album["is_complete"]:
+                logger.info("album_details_complete album_id=%s expected=%d loaded=%d", album_id, expected_count, len(merged_tracks))
+                return normalized_album
+            logger.warning("INCOMPLETE_ALBUM_RESPONSE album_id=%s expected=%d loaded=%d", album_id, expected_count, len(merged_tracks))
+            # Keep canonical partial metadata intact. A broad title search
+            # here can silently replace it with one song from a different
+            # compilation, which is worse than exposing a recoverable state.
+            return normalized_album
 
         # Resilient fallback: Search by album title / query if direct album info returned empty
         album_meta = normalized_album or {}
