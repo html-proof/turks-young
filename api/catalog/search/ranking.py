@@ -770,6 +770,100 @@ def canonical_song_key(item: dict[str, Any], kind: str) -> str:
 _semantic_fingerprint = canonical_song_key
 
 
+def _track_identity(item: dict[str, Any]) -> str:
+    """Stable provider-record identity. Stream and CDN URLs are excluded."""
+    provider = str(item.get("provider") or item.get("source") or "").strip().lower()
+    track_id = str(item.get("provider_track_id") or item.get("track_id") or
+                   item.get("provider_id") or item.get("id") or item.get("seokey") or "").strip().lower()
+    return f"{provider}:{track_id}" if track_id else ""
+
+
+def _isrc_identity(item: dict[str, Any]) -> str:
+    return str(item.get("isrc") or item.get("ISRC") or "").strip().upper()
+
+
+def _semantic_base(item: dict[str, Any]) -> str:
+    title, artists, album_val = _text(item, "song")
+    return "::".join((normalize_query(title),
+                        normalize_query(artists.split(",")[0] if artists else ""),
+                        normalize_query(album_val)))
+
+
+def _duration_seconds(item: dict[str, Any]) -> int:
+    value = item.get("duration_seconds") or item.get("duration") or item.get("duration_ms") or 0
+    try:
+        value = float(value)
+        return int(value / 1000) if value > 10000 else int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_stream_data(primary: dict[str, Any], duplicate: dict[str, Any]) -> None:
+    """Merge media variants without ever using their temporary URLs as identity."""
+    urls: dict[str, Any] = {}
+    for item in (primary, duplicate):
+        stream_urls = item.get("stream_urls")
+        if isinstance(stream_urls, dict):
+            nested = stream_urls.get("urls")
+            if isinstance(nested, dict):
+                urls.update({str(k): v for k, v in nested.items() if v})
+            urls.update({str(k): v for k, v in stream_urls.items() if k != "urls" and v})
+        url = item.get("stream_url") or item.get("streamUrl")
+        if url:
+            urls.setdefault("default", url)
+    if urls:
+        primary["stream_urls"] = {"urls": urls}
+        # Prefer the first non-empty stream already attached to the canonical
+        # record. An expired duplicate can never replace it.
+        primary["stream_url"] = primary.get("stream_url") or urls.get("high_quality") or urls.get("default") or next(iter(urls.values()))
+
+
+def _merge_song_record(primary: dict[str, Any], duplicate: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(primary)
+    _merge_stream_data(merged, duplicate)
+    for field in ("image_url", "imageUrl", "artworkUrl", "album", "language", "duration", "duration_seconds", "duration_ms", "isrc"):
+        if not merged.get(field) and duplicate.get(field):
+            merged[field] = duplicate[field]
+    merged["playable"] = (merged.get("playable") is not False or duplicate.get("playable") is not False)
+    return merged
+
+
+def merge_song_duplicates(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Canonicalize and merge provider variants in O(n), before ranking."""
+    merged: list[dict[str, Any]] = []
+    by_track: dict[str, int] = {}
+    by_isrc: dict[str, int] = {}
+    by_semantic: dict[str, list[int]] = {}
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or raw.get("name") or "").strip()
+        if not title or raw.get("playable") is False and raw.get("permanently_unavailable") is True:
+            continue
+        item = dict(raw)
+        track_key, isrc, base, seconds = _track_identity(item), _isrc_identity(item), _semantic_base(item), _duration_seconds(item)
+        target = by_track.get(track_key) if track_key else None
+        if target is None and isrc:
+            target = by_isrc.get(isrc)
+        if target is None and base:
+            for candidate in by_semantic.get(base, []):
+                prior_seconds = _duration_seconds(merged[candidate])
+                if not seconds or not prior_seconds or abs(prior_seconds - seconds) <= 3:
+                    target = candidate
+                    break
+        if target is None:
+            target = len(merged)
+            merged.append(item)
+            by_semantic.setdefault(base, []).append(target)
+        else:
+            merged[target] = _merge_song_record(merged[target], item)
+        if track_key:
+            by_track[track_key] = target
+        if isrc:
+            by_isrc[isrc] = target
+    return merged
+
+
 def rank(
     query: str,
     values: list[dict[str, Any]],
@@ -798,7 +892,8 @@ def rank(
 
     effective_q = parsed_query.free_text if (parsed_query and parsed_query.free_text) else query
 
-    seen_ids: set[str] = set()
+    if kind == "song":
+        values = merge_song_duplicates(values)
     fingerprint_map: dict[str, tuple[RankingTier, int, int, dict[str, Any]]] = {}
 
     for index, item in enumerate(values):
@@ -807,11 +902,6 @@ def rank(
         item_id = str(item.get("id") or item.get("track_id") or item.get("seokey") or "").strip()
         if not title:
             continue
-        if item_id and item_id in seen_ids:
-            continue
-        if item_id:
-            seen_ids.add(item_id)
-
         ranked_item = dict(item)
         item_tier, item_score, _ = score_item(
             query,
@@ -829,14 +919,11 @@ def rank(
         fp = canonical_song_key(ranked_item, kind)
         if fp in fingerprint_map:
             prev_tier, prev_score, prev_idx, prev_item = fingerprint_map[fp]
-            new_has_stream = bool(ranked_item.get("stream_url"))
-            prev_has_stream = bool(prev_item.get("stream_url"))
-            if (
-                item_tier < prev_tier
-                or (item_tier == prev_tier and item_score > prev_score)
-                or (item_tier == prev_tier and item_score == prev_score and new_has_stream and not prev_has_stream)
-            ):
-                fingerprint_map[fp] = (item_tier, item_score, index, ranked_item)
+            merged_item = _merge_song_record(prev_item, ranked_item) if kind == "song" else prev_item
+            if item_tier < prev_tier or (item_tier == prev_tier and item_score > prev_score):
+                fingerprint_map[fp] = (item_tier, item_score, index, merged_item)
+            else:
+                fingerprint_map[fp] = (prev_tier, prev_score, prev_idx, merged_item)
         else:
             fingerprint_map[fp] = (item_tier, item_score, index, ranked_item)
 
