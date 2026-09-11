@@ -215,7 +215,11 @@ async def main() -> None:
 
             # 3.2 user_follows
             other_uid = f"other_{uuid.uuid4().hex[:8]}"
-            await conn.execute("INSERT INTO users (uid, email) VALUES ($1, $2);", other_uid, f"{other_uid}@test.io")
+            await conn.execute(
+                "INSERT INTO users (uid, firebase_uid, email) VALUES ($1, $1, $2);",
+                other_uid,
+                f"{other_uid}@test.io",
+            )
             await conn.execute("INSERT INTO user_follows (follower_uid, following_uid) VALUES ($1, $2);", test_uid, other_uid)
             row = await conn.fetchrow("SELECT * FROM user_follows WHERE follower_uid=$1;", test_uid)
             assert row is not None

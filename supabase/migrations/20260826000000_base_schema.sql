@@ -1,7 +1,11 @@
 -- Base schema: users, profiles, favorites, history, signals, playlists, followed artists, saved albums
 
 CREATE TABLE IF NOT EXISTS users (
+  -- `uid` remains the stable application-user identifier used by every
+  -- personal-data foreign key.  Firebase UID is recorded separately so the
+  -- authentication link is explicit and protected by a database constraint.
   uid          TEXT PRIMARY KEY,
+  firebase_uid TEXT UNIQUE NOT NULL,
   email        TEXT,
   display_name TEXT,
   photo_url    TEXT,
@@ -9,6 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS users_firebase_uid_idx ON users(firebase_uid);
 
 CREATE TABLE IF NOT EXISTS user_profiles (
   uid                  TEXT    PRIMARY KEY REFERENCES users(uid) ON DELETE CASCADE,

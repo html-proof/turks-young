@@ -90,38 +90,44 @@ class PostgresUserRepository:
             # pgvector is an enhancement, never a dependency for search/home.
             return []
 
-    async def get_account(self, uid: str) -> dict[str, Any] | None:
+    async def get_account(self, firebase_uid: str) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT uid, email, display_name, photo_url, provider, account_status, "
-                "onboarding_completed, onboarding_completed_at, deleted_at FROM users WHERE uid=$1",
-                uid,
+                "SELECT uid, firebase_uid, email, display_name, photo_url, provider, account_status, "
+                "onboarding_completed, onboarding_completed_at, deleted_at "
+                "FROM users WHERE firebase_uid=$1",
+                firebase_uid,
             )
         return dict(row) if row else None
 
     async def ensure_user(self, user: AuthenticatedUser) -> None:
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO users (uid, email, display_name, photo_url, provider, last_seen_at)
-                VALUES ($1, $2, $3, $4, $5, now())
-                ON CONFLICT (uid) DO UPDATE
-                  SET email        = EXCLUDED.email,
-                      display_name = EXCLUDED.display_name,
-                      photo_url    = EXCLUDED.photo_url,
-                      provider     = EXCLUDED.provider,
-                      last_seen_at = now()
-                """,
-                user.uid, user.email, user.display_name, user.photo_url, user.provider,
-            )
-            await conn.execute(
-                """
-                INSERT INTO user_profiles (uid, display_name)
-                VALUES ($1, $2)
-                ON CONFLICT (uid) DO NOTHING
-                """,
-                user.uid, user.display_name or "",
-            )
+            # This is intentionally one transaction.  A verified Firebase UID
+            # can only resolve to its existing row or create exactly one row;
+            # a database outage propagates to the caller and is never treated
+            # as permission to manufacture a guest identity.
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO users (uid, firebase_uid, email, display_name, photo_url, provider, last_seen_at)
+                    VALUES ($1, $1, $2, $3, $4, $5, now())
+                    ON CONFLICT (firebase_uid) DO UPDATE
+                      SET email        = EXCLUDED.email,
+                          display_name = EXCLUDED.display_name,
+                          photo_url    = EXCLUDED.photo_url,
+                          provider     = EXCLUDED.provider,
+                          last_seen_at = now()
+                    """,
+                    user.uid, user.email, user.display_name, user.photo_url, user.provider,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO user_profiles (uid, display_name)
+                    VALUES ($1, $2)
+                    ON CONFLICT (uid) DO NOTHING
+                    """,
+                    user.uid, user.display_name or "",
+                )
 
     async def recreate_user(self, user: AuthenticatedUser) -> None:
         """Create a clean account after deliberate prior account deletion."""
@@ -139,7 +145,7 @@ class PostgresUserRepository:
         return {
             "authenticated": True,
             "account": {
-                "id": account["uid"], "email": account["email"],
+                "id": account["uid"], "firebase_uid": account["firebase_uid"], "email": account["email"],
                 "display_name": account["display_name"], "avatar_url": account["photo_url"],
                 "onboarding_completed": bool(account["onboarding_completed"]),
                 "onboarding_completed_at": account["onboarding_completed_at"].isoformat() if account["onboarding_completed_at"] else None,

@@ -2,6 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS users (
   uid          TEXT PRIMARY KEY,
+  firebase_uid TEXT UNIQUE NOT NULL,
   email        TEXT,
   display_name TEXT,
   photo_url    TEXT,
@@ -14,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS users_firebase_uid_idx ON users(firebase_uid);
 
 CREATE TABLE IF NOT EXISTS user_profiles (
   uid              TEXT PRIMARY KEY REFERENCES users(uid) ON DELETE CASCADE,
