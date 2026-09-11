@@ -78,6 +78,34 @@ class CandidateGenerator:
                     search_fn(artist_name, 25),
                 ))
 
+        # 1b. Taste Momentum: the current listening session is a strong but
+        # temporary signal.  It can pivot Home immediately (for example, from
+        # a long-term Malayalam profile to a Tamil listening session) without
+        # overwriting the user's enduring taste profile.
+        session_artists = sorted(
+            profile.current_session.get("artists", {}).items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:3]
+        for artist_name, _ in session_artists:
+            jobs.append((
+                "session_momentum",
+                f"Keeping your current session going with {artist_name.title()}",
+                search_fn(artist_name, 20),
+            ))
+
+        session_languages = sorted(
+            profile.current_session.get("languages", {}).items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:2]
+        for language, _ in session_languages:
+            jobs.append((
+                "session_momentum",
+                f"Matching your current {language.title()} session",
+                self.catalog.get_trending(language.title(), 20),
+            ))
+
         # 2. Preferred Languages (~100 candidates)
         sorted_langs = sorted(profile.languages.items(), key=lambda x: x[1], reverse=True)
         top_langs = [l for l, _ in sorted_langs[:3]]

@@ -45,8 +45,9 @@ class RankingEngine:
         self.weights = weights or {
             "artist_affinity": 0.25,
             "language_affinity": 0.15,
-            "song_similarity": 0.12,
+            "song_similarity": 0.10,
             "session_intent": 0.10,
+            "session_momentum": 0.13,
             "collaborative_score": 0.10,
             "genre_affinity": 0.08,
             "freshness": 0.07,
@@ -122,6 +123,15 @@ class RankingEngine:
         if discovery_score > 0:
             reasons.append("Discover something new")
 
+        # Session momentum is a contextual-bandit-style exploitation feature:
+        # reward the live listening direction only for this Home request, then
+        # let completed plays or skips update the next profile calculation.
+        session_momentum = 1.0 if src == "session_momentum" else 0.0
+        if session_momentum > 0:
+            reasons.append("Fits what you are listening to right now")
+
+        similarity_score = 0.8 if src == "song_similarity" else 0.0
+
         cand_reason = track.get("_candidate_reason")
         if cand_reason and cand_reason not in reasons:
             reasons.append(cand_reason)
@@ -137,6 +147,8 @@ class RankingEngine:
             w["language_affinity"] * lang_affinity +
             w["genre_affinity"] * genre_affinity +
             w["session_intent"] * session_match +
+            w["session_momentum"] * session_momentum +
+            w["song_similarity"] * similarity_score +
             w["collaborative_score"] * collab_score +
             w["new_release"] * new_rel_score +
             w["popularity"] * popularity +

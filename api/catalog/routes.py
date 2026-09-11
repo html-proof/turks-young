@@ -1,3 +1,4 @@
+import asyncio
 from typing import Literal
 from uuid import UUID
 
@@ -136,13 +137,19 @@ async def api_me(
     user: AuthenticatedUser = Depends(get_current_user),
     repository=Depends(get_user_repository),
 ):
-    profile = await repository.get_profile(user.uid)
-    onboarding = await repository.get_onboarding(user.uid)
+    profile, onboarding, account = await asyncio.gather(
+        repository.get_profile(user.uid),
+        repository.get_onboarding(user.uid),
+        repository.get_account(user.uid),
+    )
+    # Firebase claims may omit a previously supplied provider picture on a
+    # later token refresh. Keep the verified account record as a fallback.
+    account = account or {}
     return envelope({
         "id": user.uid,
         "email": user.email,
-        "display_name": user.display_name,
-        "photo_url": user.photo_url,
+        "display_name": user.display_name or account.get("display_name"),
+        "photo_url": user.photo_url or account.get("photo_url"),
         "onboarding_completed": onboarding["completed"],
         "onboarding_step": onboarding["step"],
         "profile": profile,

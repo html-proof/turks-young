@@ -392,7 +392,7 @@ class ProfileEngine:
             },
             interaction_count=interaction_count,
             discovery_receptivity=round(discovery_receptivity, 2),
-            algorithm_version="rec_v2",
+            algorithm_version="rec_v3_taste_momentum",
             updated_at=now.isoformat(),
         )
 
