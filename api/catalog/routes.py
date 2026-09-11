@@ -198,6 +198,10 @@ async def save_artists(
     await repository.replace_selected_artists(
         user.uid, selection.artist_ids, [names.get(sid, "") for sid in selection.artist_ids]
     )
+    # Artist selection is the final onboarding step.  Commit the authoritative
+    # account marker in the same request so a reinstall restores this account
+    # rather than asking for preferences again.
+    await repository.complete_onboarding(user.uid)
     return envelope(await repository.get_onboarding(user.uid))
 
 

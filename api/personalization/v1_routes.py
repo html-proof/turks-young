@@ -97,6 +97,10 @@ async def save_artists(data: PreferenceIds, request: Request, user: Authenticate
     except Exception:
         pass
     await repository.replace_selected_artists(user.uid, data.artist_ids, names)
+    # This endpoint is also used by the mobile onboarding flow.  Persist the
+    # completion marker with the selections so account restoration is atomic
+    # from the client's perspective.
+    await repository.complete_onboarding(user.uid)
     cache = getattr(request.app.state, "cache", None)
     if cache:
         invalidate_home(user.uid)
