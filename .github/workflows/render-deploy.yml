@@ -10,17 +10,26 @@ jobs:
   trigger-deploy:
     name: Trigger Render Deployment
     runs-on: ubuntu-latest
+    # The deploy URL is a credential.  It must be stored as a GitHub Actions
+    # secret, never committed into this workflow.
+    env:
+      RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
     steps:
       - name: Call Render Deploy Hook
         run: |
+          set -euo pipefail
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK repository secret is not configured."
+            exit 1
+          fi
+
           echo "Triggering Render deploy hook..."
-          RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST "https://api.render.com/deploy/srv-da6t7i8u01pc73dn1p30?key=3Mg_FWIFqfg")
-          STATUS=$(echo "$RESP" | grep "HTTP_STATUS" | cut -d':' -f2)
-          BODY=$(echo "$RESP" | grep -v "HTTP_STATUS")
-          echo "Render API Response: $BODY"
+          STATUS=$(curl --silent --show-error --output /dev/null \
+            --write-out '%{http_code}' --request POST "$RENDER_DEPLOY_HOOK")
+
           if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
-            echo "✅ Render deployment successfully triggered!"
+            echo "Render deployment successfully triggered."
           else
-            echo "❌ Render deploy hook returned status $STATUS"
+            echo "Render deploy hook returned HTTP $STATUS. Rotate the hook in Render and update the RENDER_DEPLOY_HOOK secret."
             exit 1
           fi
