@@ -474,7 +474,13 @@ async def songs_info(
                 await cache.set(key, [saavn_track], config.TTL_SONG)
                 return [saavn_track]
 
-    result = await _cached(cache, key, config.TTL_SONG, lambda: gaana.get_track_info([seokey]), force_fresh=refresh)
+    result = await _cached(
+        cache,
+        key,
+        config.TTL_SONG,
+        lambda: gaana.get_track_info([seokey], force_refresh=refresh),
+        force_fresh=refresh,
+    )
     if isinstance(result, dict) and "error" in result:
         if fallback_res:
             effective_title = (title or "").strip() or (seokey.replace("-", " ").title() if not seokey.startswith("saavn") else "")

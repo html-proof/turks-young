@@ -82,7 +82,7 @@ class Songs:
                 })
         return candidates
 
-    async def get_track_info(self, track_id: list) -> list:
+    async def get_track_info(self, track_id: list, *, force_refresh: bool = False) -> list:
         endpoints = self.api_endpoints
         errors = self.errors
         cache = getattr(self, "cache", None)
@@ -90,7 +90,7 @@ class Songs:
         track_info = []
         missing_ids = []
 
-        if cache and hasattr(cache, "get"):
+        if cache and hasattr(cache, "get") and not force_refresh:
             for tid in track_id:
                 try:
                     hit = await cache.get(f"songs:info:{tid}")

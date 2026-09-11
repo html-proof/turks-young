@@ -10,7 +10,9 @@ from Crypto.Cipher import DES
 
 logger = logging.getLogger(__name__)
 
-_DES_KEY = b"38343638"
+# JioSaavn rotated this key in 2026. Keep the former value as a fallback so
+# cached responses generated before the rotation remain playable.
+_DES_KEYS = (b"38346591", b"38343638")
 
 
 def decrypt_saavn_media_url(encrypted_url: str) -> str:
@@ -18,19 +20,20 @@ def decrypt_saavn_media_url(encrypted_url: str) -> str:
     if not encrypted_url or not isinstance(encrypted_url, str):
         return ""
     try:
-        cipher = DES.new(_DES_KEY, DES.MODE_ECB)
         raw = base64.b64decode(encrypted_url.strip())
-        dec = cipher.decrypt(raw)
-        pad = dec[-1]
-        if 1 <= pad <= 8:
-            dec = dec[:-pad]
-        dec_str = dec.decode("utf-8").strip()
-        if dec_str.startswith("http://"):
-            dec_str = "https://" + dec_str[7:]
-        return dec_str
+        for key in _DES_KEYS:
+            dec = DES.new(key, DES.MODE_ECB).decrypt(raw)
+            pad = dec[-1]
+            if not 1 <= pad <= 8 or dec[-pad:] != bytes([pad]) * pad:
+                continue
+            dec_str = dec[:-pad].decode("utf-8").strip()
+            if dec_str.startswith("http://"):
+                dec_str = "https://" + dec_str[7:]
+            if dec_str.startswith("https://"):
+                return dec_str
     except Exception as exc:
         logger.debug("Failed to decrypt saavn media url: %s", exc)
-        return ""
+    return ""
 
 
 def _normalize_tokens(text: str) -> set[str]:

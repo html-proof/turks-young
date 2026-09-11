@@ -15,20 +15,33 @@ from api.functions import Functions
 from api.errors import Errors
 
 
-def test_decrypt_url_des():
+@pytest.mark.parametrize("key", [b"38346591", b"38343638"])
+def test_decrypt_url_des(key: bytes):
     resolver = StreamFallbackResolver(cache=None)
-    # Encrypt a test URL using DES-ECB with key "38343638"
+    # New provider responses use 38346591; retain support for cached legacy
+    # responses encrypted with 38343638.
     from Crypto.Cipher import DES
     raw_url = "https://aac.saavncdn.com/123/sample_96.mp4"
     pad_len = 8 - (len(raw_url.encode("utf-8")) % 8)
     padded = raw_url.encode("utf-8") + bytes([pad_len] * pad_len)
-    cipher = DES.new(b"38343638", DES.MODE_ECB)
+    cipher = DES.new(key, DES.MODE_ECB)
     import base64
     encrypted_b64 = base64.b64encode(cipher.encrypt(padded)).decode("utf-8")
 
     decrypted = resolver.decrypt_url(encrypted_b64)
     assert decrypted == raw_url
     assert decrypt_saavn_media_url(encrypted_b64) == raw_url
+
+
+def test_decrypt_url_uses_current_provider_key():
+    # Captured from the current song.getDetails response for Jilla Theme.
+    encrypted_b64 = (
+        "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyinSEQqe24evGmDuThU/VgVlCaAVy3sF"
+        "MC6atNRCnGJtpvMYrKwZ3KBw7tS9a8Gtq"
+    )
+    assert decrypt_saavn_media_url(encrypted_b64) == (
+        "https://aac.saavncdn.com/155/56baa4b8b89471389d8331d0b26c8187_96.mp4"
+    )
 
 
 def test_build_fallback_stream_urls():
@@ -226,4 +239,3 @@ async def test_songs_search_songs_fallback_integration():
 
     results = await songs_module.search_songs("waka waka fifa songs song", limit=10)
     assert results == fallback_tracks
-
