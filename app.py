@@ -4,6 +4,7 @@ import os
 import re
 import uuid
 import time
+from collections import deque
 from typing import Optional
 
 import aiohttp
@@ -67,15 +68,70 @@ app.include_router(lyrics_router)
 app.include_router(catalog_router)
 app.include_router(v1_personalization_router)
 
+# Native mobile clients do not use CORS. Browser origins must be configured
+# explicitly in production instead of allowing every website by default.
 cors_origins = [
-    o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()
+    o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()
 ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins or ["*"],
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_origins=cors_origins,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Keep a small, bounded per-process request limiter as a safety net for the
+# public API and its upstream music providers. Deployments with multiple
+# instances should additionally enforce limits at Cloudflare/load-balancer.
+_RATE_LIMIT_REQUESTS = max(1, int(os.getenv("RATE_LIMIT_REQUESTS", "120")))
+_RATE_LIMIT_WINDOW_SECONDS = max(1, int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")))
+_RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
+_RATE_LIMIT_MAX_BUCKETS = 10_000
+
+
+def _rate_limit_key(request: Request) -> str:
+    forwarded = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()[:128]
+    return (request.client.host if request.client else "unknown")[:128]
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.method == "OPTIONS" or request.url.path in {"/health", "/ready"}:
+        return await call_next(request)
+    now = time.monotonic()
+    key = _rate_limit_key(request)
+    bucket = _RATE_LIMIT_BUCKETS.get(key)
+    if bucket is None:
+        if len(_RATE_LIMIT_BUCKETS) >= _RATE_LIMIT_MAX_BUCKETS:
+            stale_before = now - _RATE_LIMIT_WINDOW_SECONDS
+            for candidate, timestamps in list(_RATE_LIMIT_BUCKETS.items()):
+                if not timestamps or timestamps[-1] <= stale_before:
+                    _RATE_LIMIT_BUCKETS.pop(candidate, None)
+                    if len(_RATE_LIMIT_BUCKETS) < _RATE_LIMIT_MAX_BUCKETS:
+                        break
+        bucket = _RATE_LIMIT_BUCKETS.setdefault(key, deque())
+    cutoff = now - _RATE_LIMIT_WINDOW_SECONDS
+    while bucket and bucket[0] <= cutoff:
+        bucket.popleft()
+    if len(bucket) >= _RATE_LIMIT_REQUESTS:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Too many requests. Please try again shortly."},
+            headers={"Retry-After": str(_RATE_LIMIT_WINDOW_SECONDS)},
+        )
+    bucket.append(now)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
 
 # ---------------------------------------------------------------------------
 # Request-ID middleware

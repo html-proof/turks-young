@@ -37,20 +37,19 @@ function getTtlFromPath(pathname) {
 
 function corsHeaders(request, env) {
   const origin = request.headers.get("Origin");
-  const configured = (env.ALLOWED_ORIGINS || "*")
+  const configured = (env.ALLOWED_ORIGINS || "")
     .split(",").map((value) => value.trim()).filter(Boolean);
-  const allowOrigin = configured.includes("*")
-    ? "*"
-    : origin && configured.includes(origin)
-      ? origin
-      : configured[0] || "*";
-  return {
-    "Access-Control-Allow-Origin": allowOrigin,
+  // Mobile clients do not send an Origin header. Browser access must be
+  // explicitly allowlisted so another site cannot read API responses.
+  const allowOrigin = origin && configured.includes(origin) ? origin : null;
+  const headers = {
     "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Authorization,Content-Type,X-Request-ID",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
   };
+  if (allowOrigin) headers["Access-Control-Allow-Origin"] = allowOrigin;
+  return headers;
 }
 
 function responseHeaders(source, request, env, cacheStatus) {
@@ -73,6 +72,9 @@ export default {
       .replace(/\/$/, "");
 
     if (request.method === "OPTIONS") {
+      if (request.headers.get("Origin") && !corsHeaders(request, env)["Access-Control-Allow-Origin"]) {
+        return new Response(null, { status: 403 });
+      }
       return new Response(null, { status: 204, headers: corsHeaders(request, env) });
     }
 
@@ -96,12 +98,21 @@ export default {
       redirect: "follow",
     });
 
+    // Never cache a request that carries credentials.  Cloudflare's cache key
+    // below is deliberately URL-only for public catalogue responses, so using
+    // it for a bearer-token request could expose one user's data to another.
+    const hasCredentials = request.headers.has("Authorization") || request.headers.has("Cookie");
     try {
-      if (request.method !== "GET" || ttl === 0) {
+      if (request.method !== "GET" || ttl === 0 || hasCredentials) {
         const response = await fetch(upstreamRequest);
+        const headers = responseHeaders(response.headers, request, env, "BYPASS");
+        if (hasCredentials) {
+          headers.set("Cache-Control", "private, no-store");
+          headers.append("Vary", "Authorization, Cookie");
+        }
         return new Response(response.body, {
           status: response.status,
-          headers: responseHeaders(response.headers, request, env, "BYPASS"),
+          headers,
         });
       }
       const response = await fetch(upstreamRequest, {
