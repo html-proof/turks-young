@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from api.catalog.normalize import album, artist, song
+from api.catalog.normalize import album, artist, clean_album_or_title, song
 from api.catalog.service import CatalogService, LanguageCatalog, _apply_album_artwork
 from api.cache.redis_cache import RedisCache
 from api.catalog.search.ranking import rank
@@ -116,6 +116,13 @@ def test_song_never_uses_artist_portrait_as_artwork():
         "artist_image": "https://images.test/artist.jpg",
     })
     assert value["image_url"] is None
+
+
+def test_titles_decode_html_entities_before_they_reach_clients():
+    assert clean_album_or_title("Pranayanila (From &amp;quot;Teja Bhai&amp;quot;)") == (
+        'Pranayanila (From "Teja Bhai")'
+    )
+    assert song({"id": "pranayanila", "title": "A &QUOT;Song&QUOT;"})["title"] == 'A "Song"'
 
 
 def test_song_prioritizes_high_quality_and_preserves_stream_urls():
@@ -799,7 +806,5 @@ async def test_redis_cache_eval_loader_handles_sync_and_async_loaders():
     raw_val = {"items": []}
     res3 = await RedisCache._eval_loader(raw_val)
     assert res3 == {"items": []}
-
-
 
 

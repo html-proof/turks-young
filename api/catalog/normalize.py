@@ -1,4 +1,5 @@
 import ast
+import html
 import json
 import re
 from typing import Any
@@ -545,7 +546,15 @@ def clean_album_or_title(val: Any) -> str:
         m_id = re.search(r"""['"](?:id|seokey|album_seokey)['"]\s*:\s*['"]([^'"]+)['"]""", s)
         if m_id and m_id.group(1).strip():
             return m_id.group(1).strip().replace("-", " ").title()
-    return s
+    # Provider metadata occasionally contains HTML entities (for example,
+    # ``&quot;`` around a movie name). They are display data, not markup, so
+    # decode them before returning data to every catalog client.
+    for _ in range(2):
+        decoded = html.unescape(s)
+        if decoded == s:
+            break
+        s = decoded
+    return " ".join(s.split())
 
 
 def song(item: dict[str, Any]) -> dict[str, Any]:

@@ -1,4 +1,5 @@
 import asyncio
+import html
 import re
 from api.provider_search import encoded_query, search_entries
 
@@ -142,7 +143,10 @@ class Songs:
         data['seokey'] = seokey
         data['album_seokey'] = results.get('albumseokey') or results.get('album_seokey') or ''
         data['track_id'] = str(results.get('track_id') or results.get('id') or '')
-        data['title'] = results.get('track_title') or results.get('title') or ''
+        raw_title = results.get('track_title') or results.get('title') or ''
+        # Gaana sometimes encodes quotation marks as ``&quot;``. Return a real
+        # title so legacy /songs endpoints match the catalog API.
+        data['title'] = html.unescape(html.unescape(str(raw_title))).strip()
         data['artists'] = await functions.findArtistNames(
             results.get('artist') or []
         )

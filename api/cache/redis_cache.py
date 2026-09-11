@@ -143,7 +143,15 @@ class RedisCache:
                 value = await self._eval_loader(loader)
                 await self.set_with_stale(key, value, ttl, stale_ttl)
             except Exception as exc:
-                logger.warning("cache refresh failed key=%s error=%s", key, exc)
+                # asyncio.TimeoutError intentionally has an empty string
+                # representation. Include its type so an expected upstream
+                # timeout is diagnosable without looking like a malformed log.
+                logger.warning(
+                    "cache refresh failed key=%s error_type=%s error=%s",
+                    key,
+                    type(exc).__name__,
+                    str(exc) or "(no message)",
+                )
 
     async def delete(self, key: str) -> None:
         if not self._available or not self._client:
