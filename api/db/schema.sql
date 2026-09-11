@@ -1,7 +1,7 @@
 -- Soundwaves user data schema — run once in Supabase SQL editor
 
 CREATE TABLE IF NOT EXISTS users (
-  uid          TEXT PRIMARY KEY,
+  uid          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   firebase_uid TEXT UNIQUE NOT NULL,
   email        TEXT,
   display_name TEXT,

@@ -42,6 +42,25 @@ class PostgresUserRepository:
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
+        self._uid_cache: dict[str, str] = {}
+
+    async def resolve_uid(self, identifier: str) -> str:
+        """Resolve a Firebase UID or database UUID to the canonical users.uid UUID."""
+        if not identifier:
+            return identifier
+        if identifier in self._uid_cache:
+            return self._uid_cache[identifier]
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT uid FROM users WHERE firebase_uid = $1 OR uid = $1",
+                identifier,
+            )
+            if row:
+                resolved = row["uid"]
+                self._uid_cache[identifier] = resolved
+                self._uid_cache[resolved] = resolved
+                return resolved
+            return identifier
 
     async def get_vector_candidates(
         self,
@@ -57,6 +76,7 @@ class PostgresUserRepository:
         migration, or cold-start user vector deliberately returns no candidates.
         """
         try:
+            db_uid = await self.resolve_uid(uid)
             async with self._pool.acquire() as conn:
                 rows = await conn.fetch(
                     """
@@ -72,7 +92,7 @@ class PostgresUserRepository:
                     ORDER BY e.embedding <=> u.embedding
                     LIMIT $3
                     """,
-                    uid,
+                    db_uid,
                     [str(language).lower() for language in (languages or [])],
                     max(1, min(limit, 100)),
                 )
@@ -90,63 +110,114 @@ class PostgresUserRepository:
             # pgvector is an enhancement, never a dependency for search/home.
             return []
 
-    async def get_account(self, firebase_uid: str) -> dict[str, Any] | None:
+    async def get_account(self, identifier: str) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT uid, firebase_uid, email, display_name, photo_url, provider, account_status, "
                 "onboarding_completed, onboarding_completed_at, deleted_at "
-                "FROM users WHERE firebase_uid=$1",
-                firebase_uid,
+                "FROM users WHERE firebase_uid=$1 OR uid=$1",
+                identifier,
             )
-        return dict(row) if row else None
+        if row:
+            d = dict(row)
+            self._uid_cache[identifier] = d["uid"]
+            self._uid_cache[d["uid"]] = d["uid"]
+            if d.get("firebase_uid"):
+                self._uid_cache[d["firebase_uid"]] = d["uid"]
+            return d
+        return None
 
-    async def ensure_user(self, user: AuthenticatedUser) -> None:
+    async def ensure_user(self, user: AuthenticatedUser) -> str:
         async with self._pool.acquire() as conn:
             # This is intentionally one transaction.  A verified Firebase UID
             # can only resolve to its existing row or create exactly one row;
             # a database outage propagates to the caller and is never treated
             # as permission to manufacture a guest identity.
             async with conn.transaction():
-                await conn.execute(
-                    """
-                    INSERT INTO users (uid, firebase_uid, email, display_name, photo_url, provider, last_seen_at)
-                    VALUES ($1, $1, $2, $3, $4, $5, now())
-                    ON CONFLICT (firebase_uid) DO UPDATE
-                      SET email        = EXCLUDED.email,
-                          display_name = EXCLUDED.display_name,
-                          photo_url    = EXCLUDED.photo_url,
-                          provider     = EXCLUDED.provider,
-                          last_seen_at = now()
-                    """,
-                    user.uid, user.email, user.display_name, user.photo_url, user.provider,
+                existing = await conn.fetchrow(
+                    "SELECT uid, firebase_uid FROM users WHERE firebase_uid = $1 OR email = $2 OR uid = $1",
+                    user.uid, user.email,
                 )
+                if existing:
+                    target_uid = existing["uid"]
+                    try:
+                        uuid.UUID(target_uid)
+                    except (ValueError, TypeError):
+                        target_uid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"firebase:{user.uid}"))
+                        await conn.execute(
+                            "UPDATE users SET uid = $1 WHERE firebase_uid = $2 OR uid = $3",
+                            target_uid, user.uid, existing["uid"],
+                        )
+                    await conn.execute(
+                        """
+                        UPDATE users
+                        SET firebase_uid = $1,
+                            email        = COALESCE($2, email),
+                            display_name = COALESCE($3, display_name),
+                            photo_url    = COALESCE($4, photo_url),
+                            provider     = COALESCE($5, provider),
+                            last_seen_at = now(),
+                            updated_at   = now()
+                        WHERE uid = $6
+                        """,
+                        user.uid, user.email, user.display_name, user.photo_url, user.provider, target_uid,
+                    )
+                else:
+                    target_uid = str(uuid.uuid4())
+                    row = await conn.fetchrow(
+                        """
+                        INSERT INTO users (uid, firebase_uid, email, display_name, photo_url, provider, last_seen_at, updated_at, created_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, now(), now(), now())
+                        ON CONFLICT (firebase_uid) DO UPDATE
+                          SET email        = EXCLUDED.email,
+                              display_name = EXCLUDED.display_name,
+                              photo_url    = EXCLUDED.photo_url,
+                              provider     = EXCLUDED.provider,
+                              last_seen_at = now(),
+                              updated_at   = now()
+                        RETURNING uid
+                        """,
+                        target_uid, user.uid, user.email, user.display_name, user.photo_url, user.provider,
+                    )
+                    if row:
+                        target_uid = row["uid"]
+
                 await conn.execute(
                     """
                     INSERT INTO user_profiles (uid, display_name)
                     VALUES ($1, $2)
-                    ON CONFLICT (uid) DO NOTHING
+                    ON CONFLICT (uid) DO UPDATE
+                      SET display_name = CASE WHEN user_profiles.display_name = '' THEN EXCLUDED.display_name ELSE user_profiles.display_name END
                     """,
-                    user.uid, user.display_name or "",
+                    target_uid, user.display_name or "",
                 )
+                self._uid_cache[user.uid] = target_uid
+                self._uid_cache[target_uid] = target_uid
+                return target_uid
 
     async def recreate_user(self, user: AuthenticatedUser) -> None:
         """Create a clean account after deliberate prior account deletion."""
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute("DELETE FROM users WHERE uid=$1 AND account_status='deleted'", user.uid)
+                await conn.execute("DELETE FROM users WHERE (uid=$1 OR firebase_uid=$1) AND account_status='deleted'", user.uid)
+        self._uid_cache.pop(user.uid, None)
         await self.ensure_user(user)
 
     async def bootstrap(self, user: AuthenticatedUser) -> dict[str, Any]:
         account = await self.get_account(user.uid)
         if account is None:
             raise ValueError("ACCOUNT_NOT_FOUND")
-        onboarding = await self.get_onboarding(user.uid)
-        profile = await self.get_profile(user.uid)
+        db_uid = account["uid"]
+        onboarding = await self.get_onboarding(db_uid)
+        profile = await self.get_profile(db_uid)
         return {
             "authenticated": True,
             "account": {
-                "id": account["uid"], "firebase_uid": account["firebase_uid"], "email": account["email"],
-                "display_name": account["display_name"], "avatar_url": account["photo_url"],
+                "id": account["uid"],
+                "firebase_uid": account["firebase_uid"],
+                "email": account["email"],
+                "display_name": account["display_name"],
+                "avatar_url": account["photo_url"],
                 "onboarding_completed": bool(account["onboarding_completed"]),
                 "onboarding_completed_at": account["onboarding_completed_at"].isoformat() if account["onboarding_completed_at"] else None,
                 "account_status": account["account_status"],
@@ -162,6 +233,7 @@ class PostgresUserRepository:
         }
 
     async def get_profile(self, uid: str) -> dict[str, Any]:
+        db_uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT p.display_name, p.languages, p.language_ids, p.favorite_genres, p.favorite_artists, "
@@ -171,7 +243,7 @@ class PostgresUserRepository:
                 "pulse_followed_releases_enabled, pulse_selected_releases_enabled, pulse_trending_enabled, pulse_recommendations_enabled, "
                 "equalizer_preset, p.created_at, p.updated_at FROM user_profiles p "
                 "JOIN users u ON u.uid = p.uid WHERE p.uid = $1",
-                uid,
+                db_uid,
             )
         if row is None:
             return {}
@@ -214,9 +286,11 @@ class PostgresUserRepository:
         if not filtered:
             return await self.get_profile(uid)
 
+        db_uid = await self.resolve_uid(uid)
+
         # Build SET clause dynamically
         parts = []
-        values: list[Any] = []
+        values = []
         for i, (col, val) in enumerate(filtered.items(), start=1):
             parts.append(f"{col} = ${i}")
             values.append(val)
@@ -225,21 +299,22 @@ class PostgresUserRepository:
         parts.append(f"updated_at = ${len(values) + 1}")
         values.append(datetime.now(timezone.utc))
         # WHERE uid
-        values.append(uid)
+        values.append(db_uid)
 
         async with self._pool.acquire() as conn:
             await conn.execute(
                 f"UPDATE user_profiles SET {', '.join(parts)} WHERE uid = ${len(values)}",
                 *values,
             )
-        return await self.get_profile(uid)
+        return await self.get_profile(db_uid)
 
     async def list_favorites(self, uid: str) -> list[dict[str, Any]]:
+        db_uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT track, favorited_at FROM user_favorites "
                 "WHERE uid = $1 ORDER BY favorited_at DESC",
-                uid,
+                db_uid,
             )
         result = []
         for row in rows:
@@ -253,6 +328,7 @@ class PostgresUserRepository:
         return result
 
     async def save_favorite(self, uid: str, track: TrackSnapshot) -> tuple[dict[str, Any], bool]:
+        uid = await self.resolve_uid(uid)
         record = track.model_dump(mode="json")
         async with self._pool.acquire() as conn:
             existing = await conn.fetchrow(
@@ -275,6 +351,7 @@ class PostgresUserRepository:
         return record, created
 
     async def remove_favorite(self, uid: str, seokey: str) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "DELETE FROM user_favorites WHERE uid = $1 AND seokey = $2 RETURNING track",
@@ -288,6 +365,7 @@ class PostgresUserRepository:
         return True
 
     async def add_history(self, uid: str, event: ListeningEvent) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         record = event.model_dump(mode="json")
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -302,6 +380,7 @@ class PostgresUserRepository:
         return record
 
     async def list_history(self, uid: str, limit: int = 25) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, event, played_at FROM user_history "
@@ -326,10 +405,12 @@ class PostgresUserRepository:
         return result
 
     async def clear_history(self, uid: str) -> None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             await conn.execute("DELETE FROM user_history WHERE uid = $1", uid)
 
     async def get_signals(self, uid: str) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT bucket, key, value, score FROM user_signals WHERE uid = $1",
@@ -342,10 +423,12 @@ class PostgresUserRepository:
         return result
 
     async def clear_signals(self, uid: str) -> None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             await conn.execute("DELETE FROM user_signals WHERE uid = $1", uid)
 
     async def adjust_signals(self, uid: str, track: TrackSnapshot, amount: float) -> None:
+        uid = await self.resolve_uid(uid)
         buckets = {
             "artists": track.artists,
             "genres": track.genres,
@@ -381,6 +464,7 @@ class PostgresUserRepository:
                         )
 
     async def record_behavioral_event(self, uid: str, event: BehavioralEvent) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         record = event.model_dump(mode="json")
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -409,6 +493,7 @@ class PostgresUserRepository:
         return record
 
     async def list_behavioral_events(self, uid: str, limit: int = 100) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -441,6 +526,7 @@ class PostgresUserRepository:
         return out
 
     async def get_taste_profile(self, uid: str) -> dict[str, Any] | None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -466,6 +552,7 @@ class PostgresUserRepository:
         }
 
     async def save_taste_profile(self, uid: str, profile_data: dict[str, Any]) -> None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
@@ -494,6 +581,7 @@ class PostgresUserRepository:
             )
 
     async def save_generated_playlist(self, uid: str, mix: dict[str, Any]) -> None:
+        uid = await self.resolve_uid(uid)
         track_ids = mix.get("track_ids") or [
             str(t.get("id") or t.get("seokey") or t.get("track_id") or "")
             for t in mix.get("tracks", [])
@@ -526,6 +614,7 @@ class PostgresUserRepository:
             )
 
     async def list_generated_playlists(self, uid: str) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -559,6 +648,7 @@ class PostgresUserRepository:
         items: list[dict[str, Any]],
         section_id: str = "home_feed",
     ) -> None:
+        uid = await self.resolve_uid(uid)
         if not items:
             return
         async with self._pool.acquire() as conn:
@@ -585,6 +675,7 @@ class PostgresUserRepository:
                     pass
 
     async def get_impression_counts(self, uid: str, candidate_ids: list[str]) -> dict[str, int]:
+        uid = await self.resolve_uid(uid)
         if not candidate_ids:
             return {}
         async with self._pool.acquire() as conn:
@@ -602,6 +693,7 @@ class PostgresUserRepository:
         return {r["content_id"]: int(r["count"]) for r in rows}
 
     async def get_collaborative_candidates(self, uid: str, limit: int = 40) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -633,6 +725,7 @@ class PostgresUserRepository:
         return out
 
     async def list_playlists(self, uid: str) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, name, description, is_public, tracks, created_at, updated_at "
@@ -642,6 +735,7 @@ class PostgresUserRepository:
         return [self._playlist_record(row) for row in rows]
 
     async def get_playlist(self, uid: str, playlist_id: uuid.UUID) -> dict[str, Any] | None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id, name, description, is_public, tracks, created_at, updated_at "
@@ -651,6 +745,7 @@ class PostgresUserRepository:
         return self._playlist_record(row) if row else None
 
     async def create_playlist(self, uid: str, data: UserPlaylistCreate) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         playlist_id = uuid.uuid4()
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -666,6 +761,7 @@ class PostgresUserRepository:
     async def update_playlist(
         self, uid: str, playlist_id: uuid.UUID, data: UserPlaylistUpdate,
     ) -> dict[str, Any] | None:
+        uid = await self.resolve_uid(uid)
         changes = {k: v for k, v in data.model_dump(exclude_unset=True).items() if k in self._PLAYLIST_COLUMNS}
         if not changes:
             return await self.get_playlist(uid, playlist_id)
@@ -686,6 +782,7 @@ class PostgresUserRepository:
         return self._playlist_record(row) if row else None
 
     async def delete_playlist(self, uid: str, playlist_id: uuid.UUID) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM user_playlists WHERE uid = $1 AND id = $2",
@@ -696,6 +793,7 @@ class PostgresUserRepository:
     async def add_playlist_track(
         self, uid: str, playlist_id: uuid.UUID, track: TrackSnapshot,
     ) -> dict[str, Any] | None:
+        uid = await self.resolve_uid(uid)
         current = await self.get_playlist(uid, playlist_id)
         if current is None:
             return None
@@ -713,6 +811,7 @@ class PostgresUserRepository:
     async def remove_playlist_track(
         self, uid: str, playlist_id: uuid.UUID, seokey: str,
     ) -> dict[str, Any] | None:
+        uid = await self.resolve_uid(uid)
         current = await self.get_playlist(uid, playlist_id)
         if current is None:
             return None
@@ -727,32 +826,39 @@ class PostgresUserRepository:
         return self._playlist_record(row)
 
     async def list_followed_artists(self, uid: str) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         return await self._list_saved(uid, "user_followed_artists", "artist", "followed_at")
 
     async def follow_artist(self, uid: str, artist: ArtistSnapshot) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         return await self._save_snapshot(
             uid, "user_followed_artists", "artist", "followed_at",
             artist.seokey, artist.model_dump(mode="json"),
         )
 
     async def unfollow_artist(self, uid: str, seokey: str) -> bool:
+        uid = await self.resolve_uid(uid)
         return await self._delete_snapshot(uid, "user_followed_artists", seokey)
 
     async def list_saved_albums(self, uid: str) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         return await self._list_saved(uid, "user_saved_albums", "album", "saved_at")
 
     async def save_album(self, uid: str, album: AlbumSnapshot) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         return await self._save_snapshot(
             uid, "user_saved_albums", "album", "saved_at",
             album.seokey, album.model_dump(mode="json"),
         )
 
     async def remove_saved_album(self, uid: str, seokey: str) -> bool:
+        uid = await self.resolve_uid(uid)
         return await self._delete_snapshot(uid, "user_saved_albums", seokey)
 
     # ── Versioned recommendation API persistence ───────────────────────────
 
     async def replace_language_preferences(self, uid: str, language_ids: list[str], names: list[str]) -> None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             # Language preferences are already modeled on user_profiles. Keep
             # this write compatible with the deployed schema; the optional
@@ -765,6 +871,7 @@ class PostgresUserRepository:
                 )
 
     async def replace_selected_artists(self, uid: str, artist_ids: list[str], artist_names: list[str] | None = None) -> None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute("DELETE FROM user_selected_artists WHERE user_id=$1", uid)
@@ -779,6 +886,7 @@ class PostgresUserRepository:
                 )
 
     async def complete_onboarding(self, uid: str) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
@@ -797,6 +905,7 @@ class PostgresUserRepository:
         return await self.get_onboarding(uid)
 
     async def record_recommendation_event(self, uid: str, event: Any) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         data = event.model_dump(mode="json")
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -834,6 +943,7 @@ class PostgresUserRepository:
 
     async def record_search_impressions(self, uid: str, impressions: list[Any]) -> int:
         """Persist only results the client reports as visible to the user."""
+        uid = await self.resolve_uid(uid)
         records = [item.model_dump(mode="json") for item in impressions]
         if not records:
             return 0
@@ -852,6 +962,7 @@ class PostgresUserRepository:
 
     async def record_search_interaction(self, uid: str, interaction: Any) -> dict[str, Any]:
         """Store an explicit relevance label without changing live ranking."""
+        uid = await self.resolve_uid(uid)
         item = interaction.model_dump(mode="json")
         async with self._pool.acquire() as conn:
             await conn.execute(
@@ -864,6 +975,7 @@ class PostgresUserRepository:
         return {"accepted": True, "action": item["action"]}
 
     async def list_recently_played(self, uid: str, limit: int = 20) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT song_id,artist_id,album_id,started_at,position_ms,duration_ms,completion_percentage,source,context_id,metadata FROM playback_history WHERE user_id=$1 ORDER BY started_at DESC LIMIT $2",
@@ -889,6 +1001,7 @@ class PostgresUserRepository:
         return out
 
     async def set_song_like(self, uid: str, song_id: str, liked: bool, snapshot: dict[str, Any] | None = None) -> None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             if liked:
                 await conn.execute("INSERT INTO user_liked_songs (user_id,song_id,song) VALUES ($1,$2,$3::jsonb) ON CONFLICT (user_id,song_id) DO UPDATE SET song=EXCLUDED.song", uid, song_id, json.dumps(snapshot or {"id": song_id}))
@@ -896,11 +1009,13 @@ class PostgresUserRepository:
                 await conn.execute("DELETE FROM user_liked_songs WHERE user_id=$1 AND song_id=$2", uid, song_id)
 
     async def list_liked_song_ids(self, uid: str) -> list[str]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch("SELECT song_id FROM user_liked_songs WHERE user_id=$1 ORDER BY created_at DESC", uid)
         return [row["song_id"] for row in rows]
 
     async def delete_account(self, uid: str) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "UPDATE users SET account_status='deleted', deleted_at=now(), updated_at=now() WHERE uid=$1 AND account_status <> 'deleted'",
@@ -911,6 +1026,7 @@ class PostgresUserRepository:
     # ── Recent searches ───────────────────────────────────────────────────────
 
     async def list_recent_searches(self, uid: str, limit: int = 20) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, query, result_type, item, searched_at FROM recent_searches "
@@ -921,6 +1037,7 @@ class PostgresUserRepository:
 
     async def save_recent_search(self, uid: str, data: Any) -> dict[str, Any]:
         # Keep one current entry per exact query/type for a compact cross-device list.
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(
@@ -938,6 +1055,7 @@ class PostgresUserRepository:
         return self._recent_search_record(row)
 
     async def delete_recent_search(self, uid: str, search_id: uuid.UUID) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM recent_searches WHERE uid = $1 AND id = $2", uid, search_id
@@ -945,6 +1063,7 @@ class PostgresUserRepository:
         return result == "DELETE 1"
 
     async def clear_recent_searches(self, uid: str) -> None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             await conn.execute("DELETE FROM recent_searches WHERE uid = $1", uid)
 
@@ -963,6 +1082,7 @@ class PostgresUserRepository:
     # ── Onboarding ─────────────────────────────────────────────────────────────
 
     async def get_onboarding(self, uid: str) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT p.languages, p.language_ids, p.favorite_artists, p.favorite_artist_ids, "
@@ -982,6 +1102,7 @@ class PostgresUserRepository:
         }
 
     async def update_onboarding(self, uid: str, data: OnboardingUpdate) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         column_map = {
             "languages": "languages",
             "favorite_artists": "favorite_artists",
@@ -1014,6 +1135,7 @@ class PostgresUserRepository:
     async def reorder_playlist_tracks(
         self, uid: str, playlist_id: uuid.UUID, data: TrackOrderUpdate,
     ) -> dict[str, Any] | None:
+        uid = await self.resolve_uid(uid)
         current = await self.get_playlist(uid, playlist_id)
         if current is None:
             return None
@@ -1035,6 +1157,8 @@ class PostgresUserRepository:
     # ── User follows ───────────────────────────────────────────────────────────
 
     async def follow_user(self, follower_uid: str, following_uid: str) -> None:
+        follower_uid = await self.resolve_uid(follower_uid)
+        following_uid = await self.resolve_uid(following_uid)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO user_follows (follower_uid, following_uid) VALUES ($1, $2) "
@@ -1043,6 +1167,8 @@ class PostgresUserRepository:
             )
 
     async def unfollow_user(self, follower_uid: str, following_uid: str) -> bool:
+        follower_uid = await self.resolve_uid(follower_uid)
+        following_uid = await self.resolve_uid(following_uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM user_follows WHERE follower_uid = $1 AND following_uid = $2",
@@ -1051,6 +1177,7 @@ class PostgresUserRepository:
         return result == "DELETE 1"
 
     async def list_following(self, uid: str) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT u.uid, u.display_name, u.photo_url, f.created_at "
@@ -1063,6 +1190,7 @@ class PostgresUserRepository:
                 for r in rows]
 
     async def list_followers(self, uid: str) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT u.uid, u.display_name, u.photo_url, f.created_at "
@@ -1109,6 +1237,7 @@ class PostgresUserRepository:
 
     async def get_personalized_pulse(self, uid: str, limit: int, cursor: str | None = None) -> dict[str, Any]:
         """Rank normalized releases using backend preferences and activity only."""
+        uid = await self.resolve_uid(uid)
         profile, followed, history = await __import__("asyncio").gather(
             self.get_profile(uid), self.list_followed_artists(uid), self.list_history(uid, 100)
         )
@@ -1174,10 +1303,12 @@ class PostgresUserRepository:
                 "unread_count": await self.count_unread_pulse(uid)}
 
     async def count_unread_pulse(self, uid: str) -> int:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             return int(await conn.fetchval("SELECT COUNT(*) FROM user_pulse_items WHERE user_id=$1 AND state <> 'read'", uid) or 0)
 
     async def mark_pulse_state(self, uid: str, item_id: uuid.UUID, state: str) -> bool:
+        uid = await self.resolve_uid(uid)
         if state not in {"seen", "opened", "read"}: raise ValueError("invalid pulse state")
         async with self._pool.acquire() as conn:
             result = await conn.execute("UPDATE user_pulse_items SET state=$1 WHERE id=$2 AND user_id=$3", state, item_id, uid)
@@ -1218,6 +1349,7 @@ class PostgresUserRepository:
     async def get_pulse_feed(
         self, uid: str, limit: int, offset: int, feed_type: str,
     ) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             if feed_type == "following":
                 rows = await conn.fetch(
@@ -1235,6 +1367,7 @@ class PostgresUserRepository:
         return [self._post_record(r) for r in rows]
 
     async def create_pulse_post(self, uid: str, data: PulsePostCreate) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         playlist_id = uuid.UUID(data.playlist_id) if data.playlist_id else None
         async with self._pool.acquire() as conn:
             post_id = await conn.fetchval(
@@ -1254,6 +1387,8 @@ class PostgresUserRepository:
     async def get_pulse_post(
         self, post_id: uuid.UUID, requesting_uid: str,
     ) -> dict[str, Any] | None:
+        if requesting_uid:
+            requesting_uid = await self.resolve_uid(requesting_uid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 self._PULSE_POST_SELECT + "WHERE p.id = $2",
@@ -1262,6 +1397,7 @@ class PostgresUserRepository:
         return self._post_record(row) if row else None
 
     async def delete_pulse_post(self, uid: str, post_id: uuid.UUID) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM pulse_posts WHERE id = $1 AND uid = $2", post_id, uid,
@@ -1269,6 +1405,7 @@ class PostgresUserRepository:
         return result == "DELETE 1"
 
     async def like_post(self, uid: str, post_id: uuid.UUID) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             exists = await conn.fetchval(
                 "SELECT 1 FROM pulse_posts WHERE id = $1", post_id,
@@ -1282,6 +1419,7 @@ class PostgresUserRepository:
         return True
 
     async def unlike_post(self, uid: str, post_id: uuid.UUID) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM pulse_likes WHERE post_id = $1 AND uid = $2", post_id, uid,
@@ -1307,6 +1445,7 @@ class PostgresUserRepository:
     async def add_comment(
         self, uid: str, post_id: uuid.UUID, data: PulseCommentCreate,
     ) -> dict[str, Any] | None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             exists = await conn.fetchval(
                 "SELECT 1 FROM pulse_posts WHERE id = $1", post_id,
@@ -1328,6 +1467,7 @@ class PostgresUserRepository:
                 "updated_at": row["updated_at"].isoformat()}
 
     async def delete_comment(self, uid: str, comment_id: uuid.UUID) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM pulse_comments WHERE id = $1 AND uid = $2", comment_id, uid,
@@ -1337,6 +1477,7 @@ class PostgresUserRepository:
     # ── Devices ────────────────────────────────────────────────────────────────
 
     async def register_device(self, uid: str, data: DeviceRegister) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "INSERT INTO device_tokens (uid, token, platform, device_name) "
@@ -1351,6 +1492,7 @@ class PostgresUserRepository:
                 "created_at": row["created_at"].isoformat()}
 
     async def unregister_device(self, uid: str, device_id: uuid.UUID) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM device_tokens WHERE id = $1 AND uid = $2", device_id, uid,
@@ -1358,6 +1500,7 @@ class PostgresUserRepository:
         return result == "DELETE 1"
 
     async def get_device_tokens(self, uid: str) -> list[str]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT token FROM device_tokens WHERE uid = $1", uid,
@@ -1374,6 +1517,7 @@ class PostgresUserRepository:
         body: str,
         data: dict[str, Any] | None = None,
     ) -> None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO notifications (uid, type, title, body, data) "
@@ -1382,6 +1526,7 @@ class PostgresUserRepository:
             )
 
     async def list_notifications(self, uid: str, limit: int) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, type, title, body, data, is_read, created_at "
@@ -1395,6 +1540,7 @@ class PostgresUserRepository:
                  "created_at": r["created_at"].isoformat()} for r in rows]
 
     async def mark_notification_read(self, uid: str, notification_id: uuid.UUID) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "UPDATE notifications SET is_read = TRUE WHERE id = $1 AND uid = $2",
@@ -1403,6 +1549,7 @@ class PostgresUserRepository:
         return result == "UPDATE 1"
 
     async def mark_all_notifications_read(self, uid: str) -> int:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "UPDATE notifications SET is_read = TRUE "
@@ -1412,6 +1559,7 @@ class PostgresUserRepository:
         return int(result.split()[-1])
 
     async def delete_notification(self, uid: str, notification_id: uuid.UUID) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM notifications WHERE id = $1 AND uid = $2",
@@ -1422,6 +1570,7 @@ class PostgresUserRepository:
     # ── Player session ─────────────────────────────────────────────────────────
 
     async def get_player_session(self, uid: str) -> dict[str, Any] | None:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT track, queue, position_ms, playing, repeat_mode, shuffle_enabled, duration_ms, device_id, updated_at "
@@ -1440,6 +1589,7 @@ class PostgresUserRepository:
                 "updated_at": row["updated_at"].isoformat()}
 
     async def put_player_session(self, uid: str, data: PlayerSessionUpdate) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "INSERT INTO player_sessions (uid, track, queue, position_ms, playing, repeat_mode, shuffle_enabled, duration_ms, device_id) "
@@ -1462,6 +1612,7 @@ class PostgresUserRepository:
                 "updated_at": row["updated_at"].isoformat()}
 
     async def delete_player_session(self, uid: str) -> bool:
+        uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM player_sessions WHERE uid = $1", uid,
@@ -1469,6 +1620,7 @@ class PostgresUserRepository:
         return result == "DELETE 1"
 
     async def get_audio_settings(self, user_uuid: str) -> dict[str, Any]:
+        user_uuid = await self.resolve_uid(user_uuid)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT user_uuid, wifi_stream_quality, mobile_stream_quality, download_quality, "
@@ -1502,6 +1654,7 @@ class PostgresUserRepository:
         }
 
     async def put_audio_settings(self, user_uuid: str, update: UserAudioSettingsUpdate) -> dict[str, Any]:
+        user_uuid = await self.resolve_uid(user_uuid)
         current = await self.get_audio_settings(user_uuid)
         changes = update.model_dump(exclude_unset=True)
         wifi_q = changes.get("wifi_stream_quality", current["wifi_stream_quality"])
@@ -1547,6 +1700,7 @@ class PostgresUserRepository:
     async def _list_saved(
         self, uid: str, table: str, column: str, timestamp: str,
     ) -> list[dict[str, Any]]:
+        uid = await self.resolve_uid(uid)
         self._validate_snapshot_table(table, column, timestamp)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -1570,6 +1724,7 @@ class PostgresUserRepository:
         self, uid: str, table: str, column: str, timestamp: str,
         seokey: str, snapshot: dict[str, Any],
     ) -> dict[str, Any]:
+        uid = await self.resolve_uid(uid)
         self._validate_snapshot_table(table, column, timestamp)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1584,6 +1739,7 @@ class PostgresUserRepository:
         return result
 
     async def _delete_snapshot(self, uid: str, table: str, seokey: str) -> bool:
+        uid = await self.resolve_uid(uid)
         if table not in self._SNAPSHOT_TABLES:
             raise ValueError(f"Disallowed snapshot table: {table!r}")
         async with self._pool.acquire() as conn:
