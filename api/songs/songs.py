@@ -232,6 +232,12 @@ class Songs:
         # Fallback stream resolution if Gaana has no playable audio stream
         if not data['stream_url'] and data.get('title'):
             fallback_res = getattr(self, "_fallback_resolver", None)
+            if not fallback_res:
+                try:
+                    from api.stream_fallback import get_stream_fallback_resolver
+                    fallback_res = get_stream_fallback_resolver()
+                except Exception:
+                    fallback_res = None
             if fallback_res:
                 try:
                     fb = await fallback_res.resolve_stream(data['title'], data.get('artists') or '')

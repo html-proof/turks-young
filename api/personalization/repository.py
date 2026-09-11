@@ -263,7 +263,12 @@ class PostgresUserRepository:
                 item["album"] = clean_album_or_title(item["album"])
             if "title" in item:
                 item["title"] = clean_album_or_title(item["title"])
-            result.append(item)
+            if not str(item.get("title") or "").strip():
+                slug = str(item.get("seokey") or item.get("track_id") or item.get("id") or "").strip()
+                if slug and not slug.startswith("{") and ":" not in slug and slug not in ("unknown", "unknown-track"):
+                    item["title"] = re.sub(r"[-_]+", " ", slug).strip().title()
+            if str(item.get("title") or "").strip():
+                result.append(item)
         return result
 
     async def clear_history(self, uid: str) -> None:

@@ -95,11 +95,119 @@ class StreamFallbackResolver:
             "raw": decrypted or preview_url,
         }
 
+    async def get_song_by_id(self, pid: str) -> dict[str, Any]:
+        """Fetch song details by JioSaavn song ID."""
+        clean_pid = re.sub(r"^saavn[:-]?", "", pid.strip())
+        if not clean_pid:
+            return {}
+
+        cache_key = f"stream_fallback:song_id:{clean_pid}"
+        if self._cache:
+            try:
+                cached = await self._cache.get(cache_key)
+                if cached:
+                    if isinstance(cached, str):
+                        cached = json.loads(cached)
+                    return cached
+            except Exception:
+                pass
+
+        details_url = f"https://www.jiosaavn.com/api.php?__call=song.getDetails&pids={quote(clean_pid)}&_format=json&ctx=android"
+        try:
+            session = await self._get_session()
+            async with session.get(details_url) as resp:
+                if resp.status != 200:
+                    return {}
+                try:
+                    data = await resp.json()
+                except Exception:
+                    text = await resp.text()
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        return {}
+
+            item = None
+            if isinstance(data, dict):
+                if clean_pid in data and isinstance(data[clean_pid], dict):
+                    item = data[clean_pid]
+                elif "songs" in data and isinstance(data["songs"], list) and data["songs"]:
+                    item = data["songs"][0]
+                elif "data" in data and isinstance(data["data"], dict):
+                    item = data["data"].get(clean_pid) or (data["data"].get("songs", [None])[0] if isinstance(data["data"].get("songs"), list) else None)
+
+            if not item or not isinstance(item, dict):
+                return {}
+
+            song_title = item.get("song") or item.get("title") or ""
+            primary_artists = item.get("primary_artists") or item.get("singers") or ""
+            encrypted_url = item.get("encrypted_media_url") or ""
+            decrypted = decrypt_saavn_media_url(encrypted_url) if encrypted_url else ""
+            preview_url = item.get("media_preview_url") or ""
+            if preview_url.startswith("http://"):
+                preview_url = "https://" + preview_url[7:]
+
+            stream_dict = self.build_fallback_stream_urls(decrypted=decrypted, preview_url=preview_url)
+            primary_stream = stream_dict.get("default") or stream_dict.get("high_quality") or ""
+            if not primary_stream:
+                return {}
+
+            img_url = item.get("image") or ""
+            if img_url.startswith("http://"):
+                img_url = "https://" + img_url[7:]
+            large_artwork = re.sub(r"[-_](?:50x50|80x80|150x150|250x250|320x320)", "-500x500", img_url)
+
+            result_dict = {
+                "id": f"saavn:{clean_pid}",
+                "track_id": f"saavn:{clean_pid}",
+                "seokey": f"saavn-{clean_pid}",
+                "title": song_title,
+                "artist": primary_artists,
+                "artists": [{"name": a.strip()} for a in primary_artists.split(",") if a.strip()],
+                "album": item.get("album") or "",
+                "duration": str(item.get("duration") or "180"),
+                "image_url": large_artwork,
+                "artworkUrl": large_artwork,
+                "images": {
+                    "urls": {
+                        "large_artwork": large_artwork,
+                        "medium_artwork": img_url,
+                        "small_artwork": img_url,
+                    }
+                },
+                "stream_url": primary_stream,
+                "stream_urls": {
+                    "urls": stream_dict
+                },
+                "fallback_source": "jiosaavn",
+            }
+
+            if self._cache:
+                try:
+                    await self._cache.set(cache_key, result_dict, 86400)
+                except Exception:
+                    pass
+
+            return result_dict
+        except Exception as exc:
+            logger.warning("Stream fallback get_song_by_id failed for pid='%s': %s", clean_pid, exc)
+            return {}
+
     async def resolve_stream(self, title: str, artist: str = "") -> dict[str, Any]:
         """Search secondary open provider (JioSaavn) for a matching playable stream."""
         clean_title = (title or "").strip()
         if not clean_title:
             return {}
+
+        if clean_title.startswith("saavn:") or clean_title.startswith("saavn-"):
+            by_id = await self.get_song_by_id(clean_title)
+            if by_id:
+                return by_id
+
+        if clean_title.lower().startswith("saavn "):
+            clean_title = clean_title[6:].strip()
+            if not clean_title:
+                return {}
 
         cache_key = f"stream_fallback:{clean_title.lower()}:{artist.lower().strip()}"
         if self._cache:

@@ -180,7 +180,13 @@ async def startup_event():
     fallback_resolver = StreamFallbackResolver(cache=cache)
     app.state.fallback_resolver = fallback_resolver
     gaanapy._fallback_resolver = fallback_resolver
+    if hasattr(gaanapy, "songs"):
+        gaanapy.songs._fallback_resolver = fallback_resolver
+    if hasattr(gaanapy, "albums"):
+        gaanapy.albums._fallback_resolver = fallback_resolver
     gaanapy.cache = cache
+    from api.stream_fallback import set_stream_fallback_resolver
+    set_stream_fallback_resolver(fallback_resolver)
 
     firebase_runtime.initialize()  # still needed for JWT verification
 
@@ -244,7 +250,7 @@ MAX_SEOKEY_LENGTH = 200
 MAX_ARTIST_ID_LENGTH = 20
 MAX_LANGUAGE_LENGTH = 50
 
-SEO_KEY_BASE_PATTERN = r"^[a-zA-Z0-9\-_./%\[\]()+@]+$"
+SEO_KEY_BASE_PATTERN = r"^[a-zA-Z0-9\-_./%\[\]()+@:]+$"
 ARTIST_ID_PATTERN = r"^[0-9]+$"
 LANGUAGE_PATTERN = r"^[a-zA-Z]+(?:\s[a-zA-Z]+)*$"
 SEARCH_QUERY_PATTERN = r"^[^<>\r\n]+$"
@@ -429,43 +435,73 @@ async def songs_info(
     request: Request,
     seokey: Optional[str] = Query(None, min_length=1, max_length=MAX_SEOKEY_LENGTH, pattern=SEO_KEY_BASE_PATTERN),
     query: Optional[str] = Query(None, min_length=1, max_length=MAX_SEOKEY_LENGTH, pattern=SEO_KEY_BASE_PATTERN),
+    title: Optional[str] = Query(None, max_length=300),
+    artist: Optional[str] = Query(None, max_length=300),
     refresh: bool = Query(False),
 ):
     # Older clients used `query`; keep it as a compatible alias for the
     # provider's seokey without weakening the validation rules.
     seokey = seokey or query
-    if not seokey:
-        raise HTTPException(status_code=422, detail="seokey or query is required")
+    if not seokey and not title:
+        raise HTTPException(status_code=422, detail="seokey, query, or title is required")
+    seokey = seokey or (title.replace(" ", "-").lower() if title else "")
     gaana = _gaana(request)
     cache = _cache(request)
+    fallback_res = getattr(request.app.state, "fallback_resolver", None)
+    if not fallback_res:
+        from api.stream_fallback import get_stream_fallback_resolver
+        fallback_res = get_stream_fallback_resolver()
+
     key = f"songs:info:{seokey}"
+
+    # If seokey is explicitly a JioSaavn identifier, resolve it immediately via fallback_resolver
+    if seokey and (seokey.startswith("saavn:") or seokey.startswith("saavn-")):
+        if fallback_res:
+            fb = await fallback_res.resolve_stream(seokey, (artist or "").strip())
+            if fb and fb.get("stream_url"):
+                saavn_track = {
+                    "seokey": fb.get("seokey") or seokey,
+                    "id": fb.get("id") or seokey,
+                    "track_id": fb.get("track_id") or seokey,
+                    "title": fb.get("title") or (title or "").strip() or seokey,
+                    "artists": fb.get("artist") or (artist or "").strip(),
+                    "album": fb.get("album") or "",
+                    "duration": fb.get("duration") or "180",
+                    "stream_url": fb["stream_url"],
+                    "stream_urls": fb.get("stream_urls", {}),
+                    "images": fb.get("images", {"urls": {"large_artwork": "", "medium_artwork": "", "small_artwork": ""}}),
+                }
+                await cache.set(key, [saavn_track], config.TTL_SONG)
+                return [saavn_track]
+
     result = await _cached(cache, key, config.TTL_SONG, lambda: gaana.get_track_info([seokey]), force_fresh=refresh)
     if isinstance(result, dict) and "error" in result:
-        fallback_res = getattr(request.app.state, "fallback_resolver", None)
         if fallback_res:
-            title_guess = seokey.replace("-", " ").title()
-            fb = await fallback_res.resolve_stream(title_guess)
+            effective_title = (title or "").strip() or (seokey.replace("-", " ").title() if not seokey.startswith("saavn") else "")
+            effective_artist = (artist or "").strip()
+            fb = await fallback_res.resolve_stream(effective_title, effective_artist)
             if fb and fb.get("stream_url"):
                 synthetic_track = {
                     "seokey": seokey,
                     "id": seokey,
                     "track_id": seokey,
-                    "title": title_guess,
-                    "artists": "",
-                    "album": "",
-                    "duration": "180",
+                    "title": fb.get("title") or effective_title,
+                    "artists": fb.get("artist") or effective_artist,
+                    "album": fb.get("album") or "",
+                    "duration": fb.get("duration") or "180",
                     "stream_url": fb["stream_url"],
                     "stream_urls": fb.get("stream_urls", {}),
-                    "images": {"urls": {"large_artwork": "", "medium_artwork": "", "small_artwork": ""}},
+                    "images": fb.get("images", {"urls": {"large_artwork": "", "medium_artwork": "", "small_artwork": ""}}),
                 }
                 await cache.set(key, [synthetic_track], config.TTL_SONG)
                 return [synthetic_track]
         raise HTTPException(status_code=404, detail=result["error"])
 
     if isinstance(result, list) and result and not (result[0].get("stream_url") or "").strip():
-        fallback_res = getattr(request.app.state, "fallback_resolver", None)
-        if fallback_res and result[0].get("title"):
-            fb = await fallback_res.resolve_stream(result[0]["title"], result[0].get("artists") or "")
+        if fallback_res:
+            song_title = (title or "").strip() or result[0].get("title") or ""
+            song_artist = (artist or "").strip() or result[0].get("artists") or ""
+            fb = await fallback_res.resolve_stream(song_title, song_artist)
             if fb and fb.get("stream_url"):
                 result[0]["stream_url"] = fb["stream_url"]
                 if fb.get("stream_urls"):

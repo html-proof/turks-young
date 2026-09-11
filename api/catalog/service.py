@@ -1610,11 +1610,16 @@ class CatalogService:
                 sections.append({"id": section_id, "type": section_type, "title": title, "items": values})
 
         # 1. Made For You (Top personalized recommendation tracks)
-        add("made_for_you", "songs", "Made For You", [song(value) for value in recommended[:20]])
+        valid_recs = [song(value) for value in recommended if isinstance(value, dict)]
+        valid_recs = [s for s in valid_recs if str(s.get("title") or "").strip()]
+        add("made_for_you", "songs", "Made For You", valid_recs[:20])
 
         # 2. Recently Played (only when user has history)
         if history:
-            add("recently_played", "songs", "Recently Played", [song(value) for value in history[:15]])
+            valid_hist = [song(value) for value in history if isinstance(value, dict)]
+            valid_hist = [s for s in valid_hist if str(s.get("title") or "").strip()]
+            if valid_hist:
+                add("recently_played", "songs", "Recently Played", valid_hist[:15])
 
         # 3. Dynamic taste-based sections from taste profile
         if hasattr(recommendations, "get_taste_profile"):

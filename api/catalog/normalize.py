@@ -432,17 +432,29 @@ def _song_artwork(item: dict[str, Any]) -> str | None:
     """Return verified track/album artwork without using an artist portrait."""
     for key in (
         "artwork_large", "artwork_web", "artwork_medium", "artwork",
-        "album_artwork", "artworkUrl",
+        "album_artwork", "artworkUrl", "cover", "cover_image", "album_image",
     ):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             return _upgrade_image_quality(value.strip())
     album_value = item.get("album")
     if isinstance(album_value, dict):
-        for key in ("artworkUrl", "imageUrl", "image_url", "artwork"):
+        for key in ("artworkUrl", "imageUrl", "image_url", "artwork", "image"):
             value = album_value.get(key)
             if isinstance(value, str) and value.strip():
                 return _upgrade_image_quality(value.strip())
+    elif isinstance(album_value, str) and album_value.strip().startswith("http"):
+        return _upgrade_image_quality(album_value.strip())
+
+    direct_image = item.get("image")
+    if isinstance(direct_image, str) and direct_image.strip():
+        return _upgrade_image_quality(direct_image.strip())
+    elif isinstance(direct_image, dict):
+        for key in ("large", "medium", "small", "url"):
+            value = direct_image.get(key)
+            if isinstance(value, str) and value.strip():
+                return _upgrade_image_quality(value.strip())
+
     urls = (item.get("images") or {}).get("urls") or {}
     for key in (
         "large_artwork", "medium_artwork", "small_artwork",
@@ -452,7 +464,7 @@ def _song_artwork(item: dict[str, Any]) -> str | None:
         if isinstance(value, str) and value.strip():
             return _upgrade_image_quality(value.strip())
     artist_image = str(item.get("artist_image") or "").strip()
-    for key in ("imageUrl", "image_url", "thumbnail"):
+    for key in ("imageUrl", "image_url", "thumbnail", "photo", "atw"):
         value = item.get(key)
         if isinstance(value, str) and value.strip() and value.strip() != artist_image:
             return _upgrade_image_quality(value.strip())
@@ -550,8 +562,22 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
     label_registry.observe_song(item)
     label_str = str(item.get("label") or "").strip()
     is_official = is_verified_label(label_str) or bool(item.get("official_label_verified"))
-    raw_title = item.get("title") or item.get("name") or ""
+    raw_title = (
+        item.get("title")
+        or item.get("name")
+        or item.get("song")
+        or item.get("song_name")
+        or item.get("songName")
+        or item.get("track_name")
+        or item.get("trackName")
+        or item.get("track")
+        or ""
+    )
     title_str = clean_album_or_title(raw_title)
+    if not title_str:
+        slug = str(item.get("seokey") or item.get("track_id") or item.get("id") or "").strip()
+        if slug and not slug.startswith("{") and ":" not in slug and slug not in ("unknown", "unknown-track"):
+            title_str = re.sub(r"[-_]+", " ", slug).strip().title()
     artwork_url = _song_artwork(item)
 
     raw_album = item.get("album")
@@ -587,7 +613,7 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         or streams.get("very_high_quality") or streams.get("low_quality")
         or direct_stream or None
     )
-    if stream_final and "320.mp4" in stream_final:
+    if stream_final and "320.mp4" in stream_final and "saavn" not in stream_final:
         stream_final = stream_final.replace("320.mp4", "128.mp4")
     artist_image_url = _upgrade_image_quality(item.get("artist_image"))
     if not artist_image_url and artists and artists[0].get("image_url"):

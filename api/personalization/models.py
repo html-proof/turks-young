@@ -210,6 +210,9 @@ class TrackSnapshot(BaseModel):
     album_id: str = Field(default="", max_length=100)
     album_seokey: str = Field(default="", max_length=200)
     images: dict[str, Any] = Field(default_factory=dict)
+    image_url: str = Field(default="", max_length=500)
+    imageUrl: str = Field(default="", max_length=500)
+    artworkUrl: str = Field(default="", max_length=500)
 
     @field_validator("seokey", mode="before")
     @classmethod
@@ -230,7 +233,7 @@ class TrackSnapshot(BaseModel):
     def normalize_album_identifiers(cls, value: Any) -> str:
         return _clean_id_slug(value)
 
-    @field_validator("track_id", "language", mode="before")
+    @field_validator("track_id", "language", "image_url", "imageUrl", "artworkUrl", mode="before")
     @classmethod
     def normalize_strings(cls, value: Any) -> str:
         return "" if value is None else str(value).strip()
