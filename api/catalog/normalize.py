@@ -557,6 +557,54 @@ def clean_album_or_title(val: Any) -> str:
     return " ".join(s.split())
 
 
+def _verified_audio_variants(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pass through only explicitly verified media variants.
+
+    Providers' normal stream URLs are stereo by default.  In particular, a
+    title, artwork, EC-3 extension, or marketing flag must never manufacture
+    an Atmos capability in the client contract.
+    """
+    raw = item.get("variants") or item.get("audio_variants") or []
+    if not isinstance(raw, list):
+        return []
+    accepted: list[dict[str, Any]] = []
+    for value in raw:
+        if not isinstance(value, dict):
+            continue
+        mode = str(value.get("mode") or "stereo").lower()
+        codec = str(value.get("codec") or "").lower().replace("-", "_")
+        if codec in {"ec+3", "eac3_joc", "audio/eac3_joc"}:
+            codec = "eac3_joc"
+        url = str(value.get("url") or value.get("stream_url") or "")
+        variant_id = str(value.get("id") or "")
+        provider = str(value.get("provider") or "")
+        channels = _int(value.get("channels"))
+        if not (url.startswith("https://") and variant_id and provider):
+            continue
+        if mode == "atmos":
+            if not (codec == "eac3_joc" and channels > 2 and
+                    value.get("verified") is True and
+                    value.get("atmos_metadata") is True):
+                continue
+        elif mode == "stereo":
+            if channels > 2 or codec not in {"aac", "mp3", "opus", "flac", "alac", "pcm"}:
+                continue
+        else:
+            continue
+        accepted.append({
+            "id": variant_id, "provider": provider, "url": url,
+            "codec": codec, "mode": mode,
+            "content_version": str(value.get("content_version") or "1"),
+            "channel_layout": str(value.get("channel_layout") or ("2.0" if channels <= 2 else "5.1")),
+            "channels": channels, "sample_rate": _int(value.get("sample_rate")) or 48000,
+            "bitrate": _int(value.get("bitrate")) or None,
+            "verified": value.get("verified") is True,
+            "atmos_metadata": value.get("atmos_metadata") is True,
+            "download_allowed": value.get("download_allowed") is True,
+        })
+    return accepted
+
+
 def song(item: dict[str, Any]) -> dict[str, Any]:
     artists = _normalize_artists_list(item)
     streams = (item.get("stream_urls") or {}).get("urls") or {}
@@ -664,6 +712,7 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         "explicit": bool(item.get("is_explicit", False)),
         "stream_url": stream_final,
         "stream_urls": item.get("stream_urls") or ({"urls": streams} if streams else None),
+        "variants": _verified_audio_variants(item),
         "lyrics_url": f"/api/v1/tracks/{item.get('seokey')}/lyrics" if item.get("seokey") else None,
     }
 

@@ -24,7 +24,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # Wrangler 4.131+ requires Node.js 22 or newer.
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: cloudflare-worker/package-lock.json
 
