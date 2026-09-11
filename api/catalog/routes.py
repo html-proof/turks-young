@@ -64,26 +64,33 @@ async def relevant_artists(
     return envelope(result, count=len(result["items"]), language_ids=result["language_ids"])
 
 
+@router.get("/catalog/search", include_in_schema=False)
 @router.get("/search", summary="Search the catalog with separated result types.")
 async def search(
     request: Request,
-    q: str = Query(..., min_length=1, max_length=200),
+    q: str | None = Query(None, min_length=1, max_length=200),
+    # Older mobile builds used ``query`` and the ``/api/catalog`` namespace.
+    # Keep accepting that contract while clients migrate to ``/api/search?q=``.
+    query: str | None = Query(None, min_length=1, max_length=200),
     type: Literal["song", "track", "artist", "album", "playlist"] | None = None,
     kind: Literal["song", "track", "artist", "album", "playlist"] | None = None,
     page: int = Query(1, ge=1, le=1000),
     limit: int = Query(20, ge=1, le=50),
     user: AuthenticatedUser | None = Depends(get_optional_user),
 ):
+    search_query = (q or query or "").strip()
+    if not search_query:
+        raise HTTPException(status_code=422, detail="q or query is required")
     requested_type = type if type is not None else kind
     user_uid = user.uid if user else None
     result = await _service(request).search(
-        q.strip(),
+        search_query,
         "song" if requested_type == "track" else requested_type,
         page,
         limit,
         user_uid=user_uid,
     )
-    return envelope(result, query=q.strip())
+    return envelope(result, query=search_query)
 
 
 @router.get("/search/discover", summary="Get backend-provided search discovery sections.")
