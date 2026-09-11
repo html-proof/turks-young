@@ -140,6 +140,31 @@ class CandidateGenerator:
                 self.repository.get_collaborative_candidates(profile.user_id, limit=40),
             ))
 
+        # 8. Optional pgvector HNSW candidates.  This is intentionally a
+        # best-effort source: an empty/unavailable ANN index must never make
+        # Home or lexical search unavailable.
+        if self.repository and hasattr(self.repository, "get_vector_candidates"):
+            jobs.append((
+                "vector_ann",
+                "Picked for your taste",
+                self.repository.get_vector_candidates(
+                    profile.user_id,
+                    languages=top_langs,
+                    limit=80,
+                ),
+            ))
+
+        # A user without onboarding choices or activity still receives a
+        # useful Home feed, but it must come from the live catalog—not a
+        # bundled list of developer-selected tracks. Once the user provides
+        # signals, the personalized sources above take over.
+        if not jobs:
+            jobs.append((
+                "cold_start_live_catalog",
+                "Popular right now",
+                search_fn("trending songs", 35),
+            ))
+
         # Execute all retrieval jobs concurrently
         raw_results = await asyncio.gather(*[coro for _, _, coro in jobs], return_exceptions=True)
 

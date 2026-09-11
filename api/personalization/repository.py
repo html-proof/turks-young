@@ -43,6 +43,53 @@ class PostgresUserRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
+    async def get_vector_candidates(
+        self,
+        uid: str,
+        *,
+        languages: list[str] | None = None,
+        limit: int = 80,
+    ) -> list[dict[str, Any]]:
+        """Return small HNSW candidate set when the optional vector migration is live.
+
+        The caller still applies canonical dedupe, availability checks, and the
+        existing personalization ranking/diversity rules.  A missing extension,
+        migration, or cold-start user vector deliberately returns no candidates.
+        """
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT e.metadata
+                    FROM user_taste_vectors AS u
+                    JOIN music_embeddings AS e
+                      ON e.embedding_model = u.embedding_model
+                     AND e.embedding_version = u.embedding_version
+                    WHERE u.user_id = $1
+                      AND e.entity_type = 'track'
+                      AND e.playable = TRUE
+                      AND (cardinality($2::text[]) = 0 OR lower(coalesce(e.language, '')) = ANY($2::text[]))
+                    ORDER BY e.embedding <=> u.embedding
+                    LIMIT $3
+                    """,
+                    uid,
+                    [str(language).lower() for language in (languages or [])],
+                    max(1, min(limit, 100)),
+                )
+            candidates: list[dict[str, Any]] = []
+            for row in rows:
+                raw = row["metadata"]
+                try:
+                    value = json.loads(raw) if isinstance(raw, str) else dict(raw)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(value, dict):
+                    candidates.append(value)
+            return candidates
+        except Exception:
+            # pgvector is an enhancement, never a dependency for search/home.
+            return []
+
     async def get_account(self, uid: str) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(

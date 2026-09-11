@@ -567,7 +567,7 @@ class CatalogService:
             else:
                 async def load():
                     return _clean(await asyncio.wait_for(methods[kind](effective_query, requested), timeout=2.2))
-                result = await self._cached(f"music:search:{kind}:{effective_query}:{requested}:v11", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+                result = await self._cached(f"music:search:{kind}:{effective_query}:{requested}:v12", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
                 try:
                     user_languages, user_artists, history_tracks, previous_searches = await asyncio.wait_for(personalization_task, timeout=0.08)
                 except Exception:
@@ -756,7 +756,7 @@ class CatalogService:
                 [] if isinstance(r, Exception) or (isinstance(r, dict) and "error" in r) else r
                 for r in res
             ]
-        results = await self._cached(f"music:search:all:{effective_query}:{preview}:v13", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+        results = await self._cached(f"music:search:all:{effective_query}:{preview}:v14", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
 
         try:
             user_languages, user_artists, history_tracks, previous_searches = await asyncio.wait_for(personalization_task, timeout=0.08)

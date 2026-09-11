@@ -3,7 +3,8 @@ import json
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from api.catalog.artwork import artwork_candidates
 
 SEO_KEY_PATTERN = r"^[a-zA-Z0-9\-_./%\[\]()+@]+$"
 
@@ -198,6 +199,25 @@ class ProfileUpdate(BaseModel):
 
 class TrackSnapshot(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_artwork(cls, value: Any) -> Any:
+        # Capture nested album/provider artwork BEFORE extra fields are dropped
+        # and album is flattened to its display title in listening snapshots.
+        if not isinstance(value, dict):
+            return value
+        urls = artwork_candidates(value)
+        result = dict(value)
+        result["image_url"] = urls[0] if urls else ""
+        result["imageUrl"] = result["image_url"]
+        result["artworkUrl"] = result["image_url"]
+        original_images = result.get("images")
+        result["images"] = dict(original_images) if isinstance(original_images, dict) else {
+            "urls": {"large_artwork": result["image_url"]}}
+        if len(urls) > 1:
+            result["images"]["artwork_candidates"] = urls
+        return result
 
     seokey: str = Field(min_length=1, max_length=200, pattern=SEO_KEY_PATTERN)
     track_id: str = Field(default="", max_length=100)

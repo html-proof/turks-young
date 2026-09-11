@@ -210,7 +210,7 @@ async def home(
 ):
     cache = getattr(request.app.state, "cache", None)
     # Cache key includes refresh_generation and session_id so each refresh generates unique content
-    key = f"home:v3:{user.uid}:{type}:{limit}:{cursor or '0'}:{refresh_generation}:{session_id or ''}"
+    key = f"home:v4:{user.uid}:{type}:{limit}:{cursor or '0'}:{refresh_generation}:{session_id or ''}"
     if cache and not refresh and refresh_generation == 0:
         cached = await cache.get(key)
         if cached is not None:

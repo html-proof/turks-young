@@ -17,9 +17,20 @@ import logging
 from typing import Any
 
 from api.catalog.normalize import song
+from api.catalog.artwork import artwork_candidates
 from api.personalization.models import GeneratedPlaylistSnapshot, UserTasteProfile
 
 logger = logging.getLogger(__name__)
+
+
+def _mix_cover(tracks: list[dict[str, Any]]) -> str | None:
+    # Choose the highest-ranked actual member with usable artwork, not merely
+    # index zero's possibly missing image_url field.
+    for track in tracks:
+        urls = artwork_candidates(track)
+        if urls:
+            return urls[0]
+    return None
 
 
 class MixGenerator:
@@ -77,7 +88,7 @@ class MixGenerator:
                 title="On Repeat",
                 description="Songs you've been playing non-stop lately.",
                 tracks=repeated_tracks,
-                cover_url=repeated_tracks[0].get("image_url") if repeated_tracks else None,
+                cover_url=_mix_cover(repeated_tracks),
                 algorithm_version="rec_v2",
                 generated_at=now.isoformat(),
             ))
@@ -121,7 +132,7 @@ class MixGenerator:
                 title="Rediscover",
                 description="Past favorites you haven't heard in a while.",
                 tracks=rediscover_tracks[:20],
-                cover_url=rediscover_tracks[0].get("image_url") if rediscover_tracks else None,
+                cover_url=_mix_cover(rediscover_tracks),
                 algorithm_version="rec_v2",
                 generated_at=now.isoformat(),
             ))
@@ -149,7 +160,7 @@ class MixGenerator:
                 title="Daily Mix 1",
                 description=f"Featuring {art1.title()} and similar artists.",
                 tracks=mix1_tracks,
-                cover_url=mix1_tracks[0].get("image_url") if mix1_tracks else None,
+                cover_url=_mix_cover(mix1_tracks),
                 algorithm_version="rec_v2",
                 generated_at=now.isoformat(),
             ))
@@ -171,7 +182,7 @@ class MixGenerator:
                     title="Daily Mix 2",
                     description=f"Featuring {art2.title()} and similar artists.",
                     tracks=mix2_tracks,
-                    cover_url=mix2_tracks[0].get("image_url") if mix2_tracks else None,
+                    cover_url=_mix_cover(mix2_tracks),
                     algorithm_version="rec_v2",
                     generated_at=now.isoformat(),
                 ))
@@ -191,7 +202,7 @@ class MixGenerator:
                     title=f"Your {lang_clean} Mix",
                     description=f"The best {lang_clean} music tailored for you.",
                     tracks=lang_tracks,
-                    cover_url=lang_tracks[0].get("image_url") if lang_tracks else None,
+                    cover_url=_mix_cover(lang_tracks),
                     algorithm_version="rec_v2",
                     generated_at=now.isoformat(),
                 ))

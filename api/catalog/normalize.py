@@ -3,6 +3,7 @@ import html
 import json
 import re
 from typing import Any
+from api.catalog.artwork import artwork_candidates, normalize_url
 
 from api.catalog.labels import is_verified_label, label_registry
 from api.lyrics.service import duration_seconds
@@ -386,90 +387,22 @@ def _csv(value: Any) -> list[str]:
 
 
 def _image(item: dict[str, Any]) -> str | None:
-    raw: str | None = None
-    for key in (
-        "imageUrl", "image_url", "thumbnail", "photo", "artist_image",
-        "artworkUrl", "artwork", "artwork_large", "artwork_web",
-        "artwork_medium", "album_artwork", "atw",
-    ):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            raw = value.strip()
-            break
-    if not raw:
-        direct_image = item.get("image")
-        if isinstance(direct_image, str) and direct_image.strip():
-            raw = direct_image.strip()
-        elif isinstance(direct_image, dict):
-            for key in ("large", "medium", "small", "url"):
-                value = direct_image.get(key)
-                if isinstance(value, str) and value.strip():
-                    raw = value.strip()
-                    break
-    if not raw:
-        urls = (item.get("images") or {}).get("urls") or {}
-        raw = (
-            urls.get("large_artwork") or urls.get("medium_artwork")
-            or urls.get("small_artwork") or urls.get("large")
-            or urls.get("medium") or urls.get("small") or None
-        )
-    return _upgrade_image_quality(raw)
+    return next(iter(artwork_candidates([item, item.get("artist_image")])), None)
 
 
 def _images(item: dict[str, Any]) -> dict[str, str]:
-    urls = (item.get("images") or {}).get("urls") or {}
+    images = item.get("images")
+    urls = images.get("urls", images) if isinstance(images, dict) else {}
     fallback = _image(item) or ""
-    small = _upgrade_image_quality(urls.get("small_artwork") or urls.get("small")) or fallback
-    medium = _upgrade_image_quality(urls.get("medium_artwork") or urls.get("medium")) or fallback
-    large = _upgrade_image_quality(urls.get("large_artwork") or urls.get("large")) or fallback
     return {
-        "small": small,
-        "medium": medium,
-        "large": large,
+        size: normalize_url(urls.get(size + "_artwork") or urls.get(size)) or fallback
+        for size in ("small", "medium", "large")
     }
 
 
 def _song_artwork(item: dict[str, Any]) -> str | None:
-    """Return verified track/album artwork without using an artist portrait."""
-    for key in (
-        "artwork_large", "artwork_web", "artwork_medium", "artwork",
-        "album_artwork", "artworkUrl", "cover", "cover_image", "album_image",
-    ):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            return _upgrade_image_quality(value.strip())
-    album_value = item.get("album")
-    if isinstance(album_value, dict):
-        for key in ("artworkUrl", "imageUrl", "image_url", "artwork", "image"):
-            value = album_value.get(key)
-            if isinstance(value, str) and value.strip():
-                return _upgrade_image_quality(value.strip())
-    elif isinstance(album_value, str) and album_value.strip().startswith("http"):
-        return _upgrade_image_quality(album_value.strip())
-
-    direct_image = item.get("image")
-    if isinstance(direct_image, str) and direct_image.strip():
-        return _upgrade_image_quality(direct_image.strip())
-    elif isinstance(direct_image, dict):
-        for key in ("large", "medium", "small", "url"):
-            value = direct_image.get(key)
-            if isinstance(value, str) and value.strip():
-                return _upgrade_image_quality(value.strip())
-
-    urls = (item.get("images") or {}).get("urls") or {}
-    for key in (
-        "large_artwork", "medium_artwork", "small_artwork",
-        "large", "medium", "small",
-    ):
-        value = urls.get(key)
-        if isinstance(value, str) and value.strip():
-            return _upgrade_image_quality(value.strip())
-    artist_image = str(item.get("artist_image") or "").strip()
-    for key in ("imageUrl", "image_url", "thumbnail", "photo", "atw"):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip() and value.strip() != artist_image:
-            return _upgrade_image_quality(value.strip())
-    return None
+    """Track/album metadata only; artist portraits are separate candidates."""
+    return next(iter(artwork_candidates(item)), None)
 
 
 def _int(value: Any) -> int:
@@ -672,7 +605,7 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
     )
     if stream_final and "320.mp4" in stream_final and "saavn" not in stream_final:
         stream_final = stream_final.replace("320.mp4", "128.mp4")
-    artist_image_url = _upgrade_image_quality(item.get("artist_image"))
+    artist_image_url = normalize_url(item.get("artist_image"))
     if not artist_image_url and artists and artists[0].get("image_url"):
         artist_image_url = artists[0]["image_url"]
     meta_conf = compute_metadata_confidence(
@@ -703,6 +636,7 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         "image_url": artwork_url,
         "artworkUrl": artwork_url,
         "duration_ms": seconds * 1000,
+        "artwork_candidates": artwork_candidates([item, artist_image_url]),
         "durationMs": seconds * 1000,
         "language": str(item.get("language") or ""),
         "label": label_str,
@@ -765,7 +699,7 @@ def album(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def playlist(item: dict[str, Any]) -> dict[str, Any]:
-    artwork = item.get("image_url") or _image(item)
+    artwork = _image(item)
     tracks = item.get("tracks") if isinstance(item.get("tracks"), list) else []
     raw_id = str(item.get("seokey") or item.get("id") or "")
     if raw_id.strip().startswith("{") or "'id':" in raw_id or '"id":' in raw_id:

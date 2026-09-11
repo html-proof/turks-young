@@ -298,18 +298,18 @@ async def test_recommendations_rank_preferences_and_exclude_favorites():
 
 
 @pytest.mark.asyncio
-async def test_cold_start_does_not_inject_default_music():
+async def test_cold_start_uses_live_catalog_not_default_music():
     repo = FakeRepository()   # no profile, no history → cold start
     catalog = FakeCatalog(
-        trending=[{"seokey": "trending-song", "title": "Trending", "artists": "", "genres": "", "language": "English"}],
+        search_results=[{"seokey": "live-trending-song", "title": "Live Trending", "artists": "", "genres": "", "language": "English"}],
     )
 
     service = PersonalizedMusicService(repo)  # type: ignore[arg-type]
     results = await service.recommendations("new-user", catalog, 5)
 
-    assert catalog.searches == []
+    assert catalog.searches == ["trending songs"]
     assert catalog.languages == []
-    assert results == []
+    assert [track["seokey"] for track in results] == ["live-trending-song"]
 
 
 @pytest.mark.asyncio
