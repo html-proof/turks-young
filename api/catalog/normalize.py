@@ -568,6 +568,10 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         slug = str(item.get("seokey") or item.get("track_id") or item.get("id") or "").strip()
         if slug and not slug.startswith("{") and ":" not in slug and slug not in ("unknown", "unknown-track"):
             title_str = re.sub(r"[-_]+", " ", slug).strip().title()
+    # This Gaana slug was previously promoted to the title in sparse snapshots.
+    # Preserve actual version numbers; repair only the verified placeholder.
+    if str(item.get("seokey") or item.get("id") or "").strip().lower() == "pranaya-5" and title_str.lower() == "pranaya 5":
+        title_str = "Pranayanila (Version, 2)"
     artwork_url = _song_artwork(item)
 
     raw_album = item.get("album")

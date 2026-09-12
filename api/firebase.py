@@ -77,12 +77,29 @@ class FirebaseRuntime:
             auth.verify_id_token,
             token,
             self.app,
+            check_revoked=True,
         )
+
+    async def disable_and_revoke(self, uid: str) -> None:
+        if not self.app:
+            raise RuntimeError("Firebase is not configured")
+        try:
+            await asyncio.to_thread(auth.update_user, uid, disabled=True, app=self.app)
+            await asyncio.to_thread(auth.revoke_refresh_tokens, uid, app=self.app)
+        except auth.UserNotFoundError:
+            pass
+
+    async def creation_time(self, uid: str) -> float:
+        record = await asyncio.to_thread(auth.get_user, uid, app=self.app)
+        return record.user_metadata.creation_timestamp / 1000
 
     async def delete_user(self, uid: str) -> None:
         if not self.app:
             raise RuntimeError("Firebase is not configured")
-        await asyncio.to_thread(auth.delete_user, uid, app=self.app)
+        try:
+            await asyncio.to_thread(auth.delete_user, uid, app=self.app)
+        except auth.UserNotFoundError:
+            pass
 
     async def send_push_notification(
         self,

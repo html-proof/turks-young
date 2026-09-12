@@ -35,9 +35,6 @@ async def personalized_feed(
 ) -> dict[str, Any]:
     repo = _repo(request)
     account = await repo.get_account(user.uid)
-    if account is None:
-        await repo.ensure_user(user)
-        account = await repo.get_account(user.uid)
     if not account or account.get("account_status") != "active":
         raise HTTPException(status_code=401, detail="Account is unavailable")
     cache = getattr(request.app.state, "cache", None)
@@ -48,8 +45,7 @@ async def personalized_feed(
             return {**cached, "cached": True}
     try:
         data = await repo.get_personalized_pulse(user.uid, limit, cursor)
-        if cache:
-            await cache.set_with_stale(key, data, 120, 900)
+        await repo.publish_user_cache(user.uid, cache, key, data, 120, stale_ttl=900)
         return {**data, "cached": False}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

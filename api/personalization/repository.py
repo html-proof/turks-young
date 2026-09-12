@@ -127,6 +127,26 @@ class PostgresUserRepository:
             return d
         return None
 
+    async def get_session_account(self, firebase_uid: str) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT uid, account_status FROM users WHERE firebase_uid=$1", firebase_uid)
+        return dict(row) if row else None
+
+    async def publish_user_cache(self, uid, cache, key, data, ttl, *, stale_ttl=None, snapshot=None):
+        # Hold a shared row lock across publication. Deletion's pending barrier
+        # waits for publishers, then removes keys; late publishers see pending.
+        from api.auth import invalid_account
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                state = await conn.fetchval("SELECT account_status FROM users WHERE firebase_uid=$1 FOR SHARE", uid)
+                if state != 'active':
+                    raise invalid_account('ACCOUNT_DELETED')
+                if cache:
+                    await cache.set_with_stale(key, data, ttl, stale_ttl)
+                if snapshot is not None:
+                    snapshot[key] = data
+
     async def ensure_user(self, user: AuthenticatedUser) -> str:
         async with self._pool.acquire() as conn:
             # This is intentionally one transaction.  A verified Firebase UID
@@ -135,8 +155,8 @@ class PostgresUserRepository:
             # as permission to manufacture a guest identity.
             async with conn.transaction():
                 existing = await conn.fetchrow(
-                    "SELECT uid, firebase_uid FROM users WHERE firebase_uid = $1 OR email = $2 OR uid = $1",
-                    user.uid, user.email,
+                    "SELECT uid, firebase_uid FROM users WHERE firebase_uid = $1 OR uid = $1",
+                    user.uid,
                 )
                 if existing:
                     target_uid = existing["uid"]
@@ -195,13 +215,16 @@ class PostgresUserRepository:
                 self._uid_cache[target_uid] = target_uid
                 return target_uid
 
-    async def recreate_user(self, user: AuthenticatedUser) -> None:
-        """Create a clean account after deliberate prior account deletion."""
+    async def can_register(self, firebase_uid: str, created: float) -> bool:
         async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("DELETE FROM users WHERE (uid=$1 OR firebase_uid=$1) AND account_status='deleted'", user.uid)
-        self._uid_cache.pop(user.uid, None)
-        await self.ensure_user(user)
+            return bool(await conn.fetchval(
+                "SELECT to_timestamp($2) >= installed_at AND NOT EXISTS "
+                "(SELECT 1 FROM account_identity_ledger WHERE identity_hash=$1) "
+                "FROM account_lifecycle_epoch",
+                hashlib.sha256(firebase_uid.encode()).hexdigest(), created))
+
+    async def recreate_user(self, user: AuthenticatedUser) -> None:
+        raise ValueError("ACCOUNT_INVALID")
 
     async def bootstrap(self, user: AuthenticatedUser) -> dict[str, Any]:
         account = await self.get_account(user.uid)
@@ -885,6 +908,28 @@ class PostgresUserRepository:
                     uid, artist_ids, artist_names or artist_ids,
                 )
 
+    async def save_onboarding(self, uid: str, language_ids: list[str], names: list[str], artist_ids: list[str]) -> None:
+        """Commit both selections and completion together; retry is idempotent."""
+        if not language_ids:
+            raise ValueError("Languages are required")
+        uid = await self.resolve_uid(uid)
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.fetchrow("SELECT uid FROM users WHERE uid=$1 FOR UPDATE", uid)
+                await conn.execute("DELETE FROM user_selected_artists WHERE user_id=$1", uid)
+                for artist_id in artist_ids:
+                    await conn.execute(
+                        "INSERT INTO user_selected_artists (user_id, artist_id, source) VALUES ($1,$2,'onboarding') ON CONFLICT (user_id,artist_id) DO NOTHING",
+                        uid, artist_id,
+                    )
+                await conn.execute(
+                    "UPDATE user_profiles SET language_ids=$2, languages=$3, favorite_artist_ids=$4, favorite_artists=$4, onboarding_completed=TRUE, onboarding_step='complete', updated_at=now() WHERE uid=$1",
+                    uid, language_ids, names, artist_ids,
+                )
+                await conn.execute(
+                    "UPDATE users SET onboarding_completed=TRUE, onboarding_completed_at=COALESCE(onboarding_completed_at, now()), updated_at=now() WHERE uid=$1", uid,
+                )
+
     async def complete_onboarding(self, uid: str) -> dict[str, Any]:
         uid = await self.resolve_uid(uid)
         async with self._pool.acquire() as conn:
@@ -1015,13 +1060,7 @@ class PostgresUserRepository:
         return [row["song_id"] for row in rows]
 
     async def delete_account(self, uid: str) -> bool:
-        uid = await self.resolve_uid(uid)
-        async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "UPDATE users SET account_status='deleted', deleted_at=now(), updated_at=now() WHERE uid=$1 AND account_status <> 'deleted'",
-                uid,
-            )
-        return result == "UPDATE 1"
+        raise RuntimeError("Use AccountDeletionService.delete_account")
 
     # ── Recent searches ───────────────────────────────────────────────────────
 

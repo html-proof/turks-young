@@ -15,10 +15,12 @@ HOME_STALE: dict[str, dict[str, Any]] = {}
 
 def invalidate_home(uid: str) -> None:
     """Drop local feed snapshots for a user after a preference event."""
-    prefix = f"home:{uid}:"
     for key in tuple(HOME_STALE):
-        if key.startswith(prefix):
+        if uid in key.split(":"):
             HOME_STALE.pop(key, None)
+    for key, task in tuple(HOME_INFLIGHT.items()):
+        if uid in key.split(":"):
+            task.cancel()
 
 
 async def coalesce(key: str, factory):

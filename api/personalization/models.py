@@ -490,6 +490,19 @@ class PreferenceIds(BaseModel):
         return result
 
 
+class OnboardingSelections(BaseModel):
+    language_ids: list[str] = Field(min_length=1, max_length=20)
+    # Keep the existing Skip artists action available.
+    artist_ids: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("language_ids", "artist_ids")
+    @classmethod
+    def clean_ids(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("IDs cannot be empty")
+        return list(dict.fromkeys(item.strip() for item in value))
+
+
 class RecommendationEvent(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 

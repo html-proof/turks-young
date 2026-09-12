@@ -2,10 +2,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from api.auth import AuthenticatedUser, account_error, get_current_user
+from api.auth import AuthenticatedUser, account_error, get_current_user, get_firebase_user, invalid_account
+from api.accounts import delete_self
 from api.core.home_state import HOME_STALE, coalesce, invalidate_home
 from api.personalization.models import (
-    AlbumSnapshot, ArtistSnapshot, PreferenceIds, RecommendationEvent,
+    AlbumSnapshot, ArtistSnapshot, PreferenceIds, OnboardingSelections, RecommendationEvent,
     SearchImpression, SearchInteraction,
 )
 from api.personalization.routes import get_personalization_service, get_user_repository
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/api/v1", tags=["Music Hub v1"])
 
 
 @router.post("/auth/google")
-async def google_auth(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
+async def google_auth(request: Request, user: AuthenticatedUser = Depends(get_firebase_user)):
     """Exchange a verified Firebase/Google identity for a Music Hub account session.
 
     Firebase owns the token/session; this endpoint provisions the database record once
@@ -26,15 +27,16 @@ async def google_auth(request: Request, user: AuthenticatedUser = Depends(get_cu
     existing = await repository.get_account(user.uid)
     if existing and existing["account_status"] != "deleted":
         if existing["account_status"] != "active":
-            raise account_error("ACCOUNT_UNAVAILABLE", "This account is not active.", 403)
+            raise invalid_account("ACCOUNT_DISABLED")
         # Refresh email, display name, avatar, provider, and last_seen_at on
         # every successful exchange so Supabase stays aligned with Firebase.
         await repository.ensure_user(user)
-    elif existing and existing["account_status"] == "deleted":
-        # Deliberate recreation starts a fresh account; cascades remove the old
-        # private data and onboarding state before provisioning the new record.
-        await repository.recreate_user(user)
+    elif existing:
+        raise invalid_account("ACCOUNT_DELETED")
     else:
+        created = await request.app.state.firebase.creation_time(user.uid)
+        if not await repository.can_register(user.uid, created):
+            raise invalid_account("USER_NOT_FOUND")
         await repository.ensure_user(user)
     return await repository.bootstrap(user)
 
@@ -107,6 +109,17 @@ async def save_artists(data: PreferenceIds, request: Request, user: Authenticate
     return {"artist_ids": data.artist_ids}
 
 
+@router.post("/me/onboarding")
+async def save_onboarding(data: OnboardingSelections, request: Request, user: AuthenticatedUser = Depends(get_current_user), repository=Depends(get_user_repository)):
+    catalog = _catalog(request)
+    if any(not catalog.languages.resolve([value]) for value in data.language_ids):
+        raise HTTPException(422, "Unknown language")
+    ids = catalog.languages.normalize_ids(data.language_ids)
+    await repository.save_onboarding(user.uid, ids, [catalog.languages.by_id[value].name for value in ids], data.artist_ids)
+    invalidate_home(user.uid)
+    return {"onboarding_completed": True}
+
+
 @router.post("/me/onboarding/complete")
 async def complete_onboarding(user: AuthenticatedUser = Depends(get_current_user), repository=Depends(get_user_repository)):
     try:
@@ -118,16 +131,7 @@ async def complete_onboarding(user: AuthenticatedUser = Depends(get_current_user
 
 @router.delete("/me")
 async def delete_current_account(request: Request, user: AuthenticatedUser = Depends(get_current_user), repository=Depends(get_user_repository)):
-    deleted = await repository.delete_account(user.uid)
-    if not deleted:
-        raise account_error("ACCOUNT_NOT_FOUND", "This account is no longer available.")
-    # Firebase deletion is best effort: the database status invalidates the account
-    # immediately, including existing ID tokens.
-    try:
-        await request.app.state.firebase.delete_user(user.uid)
-    except Exception:
-        pass
-    return {"deleted": True}
+    return await delete_self(request, user)
 
 
 @router.get("/home")
@@ -151,10 +155,10 @@ async def home(request: Request, refresh: bool = False, limit: int = Query(24, g
 
     try:
         data = await coalesce(key, build)
-        HOME_STALE[key] = data
-        if cache:
-            await cache.set(key, data, 900)
+        await repository.publish_user_cache(user.uid, cache, key, data, 900, snapshot=HOME_STALE)
         return data
+    except HTTPException:
+        raise
     except Exception:
         stale = HOME_STALE.get(key)
         if stale is not None:

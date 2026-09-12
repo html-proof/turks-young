@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
   provider     TEXT,
   onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
   onboarding_completed_at TIMESTAMPTZ,
-  account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active', 'disabled', 'suspended', 'deleted')),
+  account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active', 'disabled', 'suspended', 'deletion_pending', 'deleted')),
   deleted_at    TIMESTAMPTZ,
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),

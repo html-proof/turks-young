@@ -1,4 +1,5 @@
 import logging
+import asyncio
 import logging.config
 import os
 import re
@@ -206,6 +207,8 @@ app.state.db_pool = None
 app.state.lyrics_service = None
 app.state.catalog_service = None
 app.state.fallback_resolver = None
+from api.accounts import router as account_router, AccountDeletionService
+app.include_router(account_router)
 
 
 @app.on_event("startup")
@@ -255,6 +258,8 @@ async def startup_event():
                 app.state.catalog_service.db_pool = pool
             repo = PostgresUserRepository(pool)
             app.state.user_repository = repo
+            app.state.account_deletion = AccountDeletionService(pool, firebase_runtime, cache)
+            app.state.account_cleanup_task = asyncio.create_task(app.state.account_deletion.run())
             app.state.personalization_service = PersonalizedMusicService(repo)
             label_repo = PostgresLabelRepository(pool)
             label_registry.repository = label_repo
@@ -278,6 +283,10 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    task = getattr(app.state, "account_cleanup_task", None)
+    if task:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     await label_registry.flush_pending_to_db()
     gaanapy: GaanaPy | None = app.state.gaanapy
     if gaanapy and hasattr(gaanapy, "aiohttp"):

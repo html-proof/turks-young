@@ -250,10 +250,10 @@ async def home(
 
     try:
         data = await coalesce(key, build)
-        HOME_STALE[key] = data
-        if cache:
-            await cache.set(key, data, 300)
+        await repository.publish_user_cache(user.uid, cache, key, data, 300, snapshot=HOME_STALE)
         return envelope(data, cached=False)
+    except HTTPException:
+        raise
     except Exception:
         stale = HOME_STALE.get(key)
         if stale is not None:

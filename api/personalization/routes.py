@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, sta
 
 from api.auth import AuthenticatedUser, account_error, get_current_user
 from api.firebase import FirebaseRuntime
+from api.accounts import delete_self
 from api.personalization.models import (
     AlbumSnapshot,
     ArtistSnapshot,
@@ -44,8 +45,7 @@ async def get_user_repository(
         )
     account = await repository.get_account(user.uid)
     if account is None:
-        await repository.ensure_user(user)
-        account = await repository.get_account(user.uid)
+        raise account_error("PROFILE_NOT_FOUND", "No profile exists for this Firebase UID.", 404)
     if account and account.get("account_status") != "active":
         code = "ACCOUNT_DELETED" if account.get("account_status") == "deleted" else "ACCOUNT_UNAVAILABLE"
         raise account_error(code, "This account is no longer available.")
@@ -435,9 +435,7 @@ async def delete_account(
     user: AuthenticatedUser = Depends(get_current_user),
     repository: FirebaseUserRepository = Depends(get_user_repository),
 ) -> dict[str, bool]:
-    await repository.delete_account(user.uid)
-    await request.app.state.firebase.delete_user(user.uid)
-    return {"deleted": True}
+    return await delete_self(request, user)
 
 
 # ── Onboarding ──────────────────────────────────────────────────────────────

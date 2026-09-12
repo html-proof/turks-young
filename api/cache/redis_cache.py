@@ -154,6 +154,7 @@ class RedisCache:
                 )
 
     async def delete(self, key: str) -> None:
+        self._local.pop(key, None)
         if not self._available or not self._client:
             return
         try:
@@ -164,3 +165,22 @@ class RedisCache:
     @property
     def available(self) -> bool:
         return self._available
+
+    async def delete_user_data(self, uid: str) -> None:
+        """Delete exact UID components; failures keep the deletion job pending."""
+        for key in tuple(self._local):
+            if uid in key.split(":"):
+                self._local.pop(key, None)
+        if not self._url or not self._token:
+            return
+        if not self._client:
+            if not await self.connect():
+                raise RuntimeError("Account cache cleanup unavailable")
+        cursor = 0
+        while True:
+            cursor, keys = await self._client.scan(cursor, count=200)
+            owned = [key for key in keys if uid in key.split(":")]
+            if owned:
+                await self._client.delete(*owned)
+            if int(cursor) == 0:
+                break
