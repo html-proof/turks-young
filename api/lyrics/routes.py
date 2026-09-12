@@ -24,8 +24,16 @@ async def _lyrics_for_track(
 ):
     cache = getattr(request.app.state, "cache", None)
     cache_key = f"songs:info:{track_id}"
-    tracks = await cache.get(cache_key) if cache else None
-    if tracks is None:
+    # The player already supplies these fields. Avoid a second music-provider
+    # round trip before even checking the lyrics cache.
+    supplied_metadata = bool(title and artist and duration and duration > 0)
+    tracks = None
+    if not supplied_metadata and cache:
+        try:
+            tracks = await cache.get(cache_key)
+        except Exception:
+            pass
+    if tracks is None and not supplied_metadata:
         try:
             tracks = await request.app.state.gaanapy.get_track_info([track_id])
             if cache and not (isinstance(tracks, dict) and "error" in tracks):

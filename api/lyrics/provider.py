@@ -216,11 +216,23 @@ class LRCLibProvider(LyricsProvider):
             try:
                 candidates = await self._request("search", query_params)
                 if isinstance(candidates, list):
+                    verified_candidates = []
                     for cand in candidates:
                         cand_id = cand.get("id")
                         if cand_id and cand_id not in seen_ids:
                             seen_ids.add(cand_id)
                             all_candidates.append(cand)
+                        if cand.get("syncedLyrics") or cand.get("plainLyrics") or cand.get("instrumental"):
+                            valid, score, _ = LyricsVerifier.verify_candidate(cand, fingerprint)
+                            if valid:
+                                verified_candidates.append((score, cand))
+                    # Later queries are fallbacks, not prerequisites for a
+                    # verified result. Still choose the best match in this batch.
+                    if verified_candidates:
+                        score, best = max(verified_candidates, key=lambda item: item[0])
+                        best["_verified"] = True
+                        best["_verification_score"] = score
+                        return best
             except LyricsRateLimited:
                 raise
             except LyricsProviderError as exc:

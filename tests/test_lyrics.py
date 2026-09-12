@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,46 @@ class FakeRepository:
         if status is not None and self.cached.get("status") != status:
             return None
         return self.cached
+
+
+@pytest.mark.asyncio
+async def test_player_metadata_skips_extra_song_lookup():
+    from api.lyrics.routes import _lyrics_for_track
+    state = SimpleNamespace(cache=AsyncMock(), gaanapy=AsyncMock(), lyrics_service=AsyncMock())
+    state.lyrics_service.get_lyrics.return_value = {"status": "available"}
+    result = await _lyrics_for_track(SimpleNamespace(app=SimpleNamespace(state=state)),
+        "song-id", title="Tum Hi Ho", artist="Arijit Singh", duration=262)
+    assert result["status"] == "available"
+    state.gaanapy.get_track_info.assert_not_awaited()
+    state.cache.get.assert_not_awaited()
+    assert state.lyrics_service.get_lyrics.call_args.args[0]["seokey"] == "song-id"
+
+
+@pytest.mark.asyncio
+async def test_search_returns_verified_match_without_waiting_for_fallbacks():
+    from api.lyrics.provider import LRCLibProvider
+    provider = object.__new__(LRCLibProvider)
+    candidate = {"id": 1, "trackName": "Tum Hi Ho", "artistName": "Arijit Singh",
+                 "albumName": "Aashiqui 2", "duration": 262, "plainLyrics": "Lyrics"}
+    provider._request = AsyncMock(side_effect=[None, None, [candidate]])
+    result = await provider.get_lyrics({"title": "Tum Hi Ho", "artists": "Arijit Singh",
+                                        "album": "Aashiqui 2", "duration": 262})
+    assert result["_verified"] is True
+    assert provider._request.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_wrong_song_before_using_fallback():
+    from api.lyrics.provider import LRCLibProvider
+    provider = object.__new__(LRCLibProvider)
+    candidate = {"id": 1, "trackName": "Tum Hi Ho", "artistName": "Arijit Singh",
+                 "albumName": "Aashiqui 2", "duration": 262, "plainLyrics": "Lyrics"}
+    wrong = {**candidate, "id": 2, "trackName": "Different Song", "artistName": "Someone Else"}
+    provider._request = AsyncMock(side_effect=[None, None, [wrong], [candidate]])
+    result = await provider.get_lyrics({"title": "Tum Hi Ho", "artists": "Arijit Singh",
+                                        "album": "Aashiqui 2", "duration": 262})
+    assert result["id"] == 1
+    assert provider._request.await_count == 4
 
 
 def test_parse_lrc_supports_fractions_multiple_timestamps_and_duration():
