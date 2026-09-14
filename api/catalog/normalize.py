@@ -700,8 +700,9 @@ def album(item: dict[str, Any]) -> dict[str, Any]:
         "song_count": track_count,
         "trackCount": track_count,
     }
-    if "tracks" in item:
-        tracks = item.get("tracks") if isinstance(item.get("tracks"), list) else []
+    raw_tracks = item.get("tracks") or item.get("songs")
+    if raw_tracks is not None:
+        tracks = raw_tracks if isinstance(raw_tracks, list) else []
         data["songs"] = [song(track) for track in tracks if isinstance(track, dict)]
         data["tracks"] = data["songs"]
     return data

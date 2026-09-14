@@ -1348,9 +1348,52 @@ class CatalogService:
                 normalized_album["has_more"] = not normalized_album["is_complete"]
                 return normalized_album
 
-            # Resilient fallback: Search by album title / query if direct album info returned empty
+            # JioSaavn fallback: try resolving tracks from JioSaavn when Gaana
+            # returns album metadata but no playable tracks.
             album_meta = normalized_album or {}
-            album_title = album_meta.get("name") or album_meta.get("title") or album_id.replace("-", " ").replace("_", " ").strip()
+            fb_title = album_meta.get("name") or album_meta.get("title") or album_id.replace("-", " ").replace("_", " ").strip()
+            if fb_title:
+                try:
+                    from api.stream_fallback import get_stream_fallback_resolver
+                    fb_res = get_stream_fallback_resolver()
+                    fb_albums = await asyncio.wait_for(fb_res.search_albums(fb_title, 5), timeout=2.5)
+                    if fb_albums:
+                        for fb_alb in fb_albums:
+                            fb_alb_title = str(fb_alb.get("title") or fb_alb.get("name") or "").lower().strip()
+                            if not fb_alb_title:
+                                continue
+                            # Match on title similarity
+                            if fb_title.lower().strip() in fb_alb_title or fb_alb_title in fb_title.lower().strip():
+                                fb_alb_id = str(fb_alb.get("id") or fb_alb.get("album_id") or "")
+                                if fb_alb_id:
+                                    fb_details = await asyncio.wait_for(fb_res.get_album_details(fb_alb_id), timeout=2.5)
+                                    fb_songs = (fb_details.get("songs") or fb_details.get("tracks") or []) if fb_details else []
+                                    if fb_songs:
+                                        result_album = album_meta.copy() if album_meta else {}
+                                        result_album.update({
+                                            "id": result_album.get("id") or album_id,
+                                            "seokey": result_album.get("seokey") or album_id,
+                                            "tracks": fb_songs,
+                                            "songs": fb_songs,
+                                            "song_count": len(fb_songs),
+                                            "trackCount": len(fb_songs),
+                                            "expected_track_count": len(fb_songs),
+                                            "loaded_track_count": len(fb_songs),
+                                            "is_complete": True,
+                                            "has_more": False,
+                                        })
+                                        if not result_album.get("image_url"):
+                                            fb_img = fb_details.get("image_url") or fb_details.get("artworkUrl") or ""
+                                            if fb_img:
+                                                result_album["image_url"] = fb_img
+                                                result_album["imageUrl"] = fb_img
+                                                result_album["artworkUrl"] = fb_img
+                                        return result_album
+                except Exception as exc:
+                    logger.debug("album_details JioSaavn track fallback failed title=%s: %s", fb_title, exc)
+
+            # Resilient fallback: Search by album title / query if direct album info returned empty
+            album_title = fb_title
             clean_query = re.sub(r'[^a-zA-Z0-9\s]+', ' ', album_title).strip()
             query_candidates = [q for q in (album_title, clean_query) if q and not q.isdigit()]
 
