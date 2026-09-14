@@ -155,6 +155,15 @@ async def api_me(
         "photo_url": user.photo_url or account.get("photo_url"),
         "onboarding_completed": has_completed,
         "onboarding_step": "complete" if has_completed else onboarding.get("step", "language"),
+        "account": {
+            "id": user.uid,
+            "uid": user.uid,
+            "firebase_uid": user.uid,
+            "email": user.email,
+            "display_name": user.display_name or account.get("display_name"),
+            "photo_url": user.photo_url or account.get("photo_url"),
+            "onboarding_completed": has_completed,
+        },
         "profile": profile | {"onboarding_completed": has_completed},
     })
 
