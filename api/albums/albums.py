@@ -43,10 +43,27 @@ class Albums:
     async def get_album_info(self, album_id: list, info: bool, fetch_missing_tracks: bool = True) -> list:
         endpoints = self.api_endpoints
         errors = self.errors
-        results = await asyncio.gather(*[
-            self._safe_request("POST", endpoints.album_details_url + i)
-            for i in album_id
-        ])
+
+        async def _fetch_one(aid: str) -> dict:
+            i_str = str(aid).strip()
+            if not i_str:
+                return {}
+            if i_str.isdigit():
+                res = await self._safe_request("POST", f"https://gaana.com/apiv2?country=IN&type=albumDetail&id={i_str}")
+                if isinstance(res, dict) and (res.get("album") or res.get("tracks")):
+                    return res
+                res2 = await self._safe_request("POST", f"https://gaana.com/apiv2?country=IN&type=albumDetail&album_id={i_str}")
+                if isinstance(res2, dict) and (res2.get("album") or res2.get("tracks")):
+                    return res2
+                return res if isinstance(res, dict) else {}
+            res = await self._safe_request("POST", endpoints.album_details_url + i_str)
+            if isinstance(res, dict) and (res.get("album") or res.get("tracks")):
+                alb_meta = res.get("album") if isinstance(res.get("album"), dict) else {}
+                if str(alb_meta.get("title")).lower() != "undefined" and str(alb_meta.get("seokey")).lower() != "undefined":
+                    return res
+            return {}
+
+        results = await asyncio.gather(*[_fetch_one(i) for i in album_id])
         album_info = []
         for result in results:
             if isinstance(result, dict) and "error" in result:
@@ -59,7 +76,9 @@ class Albums:
     async def get_album_tracks(self, album_id: str, raw_tracks: list = None, album_meta: dict = None, fetch_missing: bool = True) -> list:
         if raw_tracks is None:
             endpoints = self.api_endpoints
-            result = await self._safe_request("POST", endpoints.album_details_url + album_id)
+            i_str = str(album_id).strip()
+            url = f"https://gaana.com/apiv2?country=IN&type=albumDetail&id={i_str}" if i_str.isdigit() else (endpoints.album_details_url + i_str)
+            result = await self._safe_request("POST", url)
             if isinstance(result, dict) and "error" in result:
                 return result
             raw_tracks = result.get('tracks') or (result.get('album', {}).get('tracks') if isinstance(result.get('album'), dict) else None) or []
@@ -117,12 +136,22 @@ class Albums:
         data = {}
 
         album = results.get('album')
-        if not album or not album.get('seokey'):
+        if not album:
             return await errors.no_results()
 
-        data['seokey'] = album['seokey']
-        data['album_id'] = album.get('album_id', '')
-        data['title'] = album.get('title', '')
+        title = str(album.get('title') or album.get('name') or '').strip()
+        seokey = str(album.get('seokey') or album.get('seo') or '').strip()
+        if title.lower() == 'undefined' and (not seokey or seokey.lower() == 'undefined'):
+            return await errors.no_results()
+
+        if not seokey or seokey.lower() == 'undefined':
+            seokey = str(album.get('album_id') or results.get('album_id') or '').strip()
+        if not seokey:
+            return await errors.no_results()
+
+        data['seokey'] = seokey
+        data['album_id'] = str(album.get('album_id') or results.get('album_id') or '')
+        data['title'] = title
         try:
             # Resolve names and IDs from the same provider collection. Mixing
             # album-level names with first-track IDs silently associated the

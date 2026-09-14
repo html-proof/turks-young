@@ -1152,128 +1152,138 @@ class CatalogService:
         )
 
     async def album_details(self, album_id: str) -> dict[str, Any] | None:
-        normalized_album = None
-        merged_tracks: list[dict[str, Any]] = []
-        seen_tracks: set[str] = set()
-        expected_count = 0
-        # A provider can return a valid but incomplete first body. Retry the
-        # same canonical album ID and merge tracks; never call title search to
-        # fill an album because that can attach the wrong recording.
-        for attempt in range(3):
-            try:
-                result = _clean(await self.catalog.get_album_info([album_id], True))
-                if not isinstance(result, list) or not result:
-                    continue
-                candidate = album(result[0])
-                if not ((candidate.get("id") or candidate.get("provider_id")) and candidate.get("name")):
-                    continue
-                normalized_album = candidate
-                expected_count = max(expected_count, int(candidate.get("trackCount") or candidate.get("song_count") or candidate.get("track_count") or 0))
-                for track in candidate.get("tracks") or candidate.get("songs") or []:
-                    key = str(track.get("track_id") or track.get("provider_id") or track.get("id") or track.get("seokey") or "").strip().lower()
-                    if not key:
-                        key = f"{str(track.get('title') or '').strip().lower()}|{str(track.get('artist') or '').strip().lower()}"
-                    if key and key not in seen_tracks:
-                        seen_tracks.add(key)
-                        merged_tracks.append(track)
-                if expected_count <= 0 or len(merged_tracks) >= expected_count:
-                    break
-                await asyncio.sleep(0.25 * (attempt + 1))
-            except Exception:
-                logger.exception("album_details provider_failure album_id=%s attempt=%d", album_id, attempt + 1)
+        album_id = (album_id or "").strip()
+        if not album_id:
+            return None
 
-        if normalized_album and merged_tracks:
-            normalized_album["tracks"] = merged_tracks
-            normalized_album["songs"] = merged_tracks
-            normalized_album["expected_track_count"] = expected_count or len(merged_tracks)
-            normalized_album["loaded_track_count"] = len(merged_tracks)
-            normalized_album["is_complete"] = expected_count <= 0 or len(merged_tracks) >= expected_count
-            normalized_album["has_more"] = not normalized_album["is_complete"]
-            if normalized_album["is_complete"]:
-                logger.info("album_details_complete album_id=%s expected=%d loaded=%d", album_id, expected_count, len(merged_tracks))
+        async def load() -> dict[str, Any] | None:
+            normalized_album = None
+            merged_tracks: list[dict[str, Any]] = []
+            seen_tracks: set[str] = set()
+            expected_count = 0
+
+            for attempt in range(2):
+                try:
+                    result = _clean(await self.catalog.get_album_info([album_id], True))
+                    if not isinstance(result, list) or not result:
+                        continue
+                    candidate = album(result[0])
+                    if not ((candidate.get("id") or candidate.get("provider_id")) and candidate.get("name")):
+                        continue
+                    normalized_album = candidate
+                    expected_count = max(expected_count, int(candidate.get("trackCount") or candidate.get("song_count") or candidate.get("track_count") or 0))
+                    for track in candidate.get("tracks") or candidate.get("songs") or []:
+                        key = str(track.get("track_id") or track.get("provider_id") or track.get("id") or track.get("seokey") or "").strip().lower()
+                        if not key:
+                            key = f"{str(track.get('title') or '').strip().lower()}|{str(track.get('artist') or '').strip().lower()}"
+                        if key and key not in seen_tracks:
+                            seen_tracks.add(key)
+                            merged_tracks.append(track)
+                    if expected_count <= 0 or len(merged_tracks) >= expected_count:
+                        break
+                    await asyncio.sleep(0.15 * (attempt + 1))
+                except Exception:
+                    logger.warning("album_details provider_failure album_id=%s attempt=%d", album_id, attempt + 1)
+
+            if normalized_album and merged_tracks:
+                normalized_album["tracks"] = merged_tracks
+                normalized_album["songs"] = merged_tracks
+                normalized_album["expected_track_count"] = expected_count or len(merged_tracks)
+                normalized_album["loaded_track_count"] = len(merged_tracks)
+                normalized_album["is_complete"] = expected_count <= 0 or len(merged_tracks) >= expected_count
+                normalized_album["has_more"] = not normalized_album["is_complete"]
                 return normalized_album
-            logger.warning("INCOMPLETE_ALBUM_RESPONSE album_id=%s expected=%d loaded=%d", album_id, expected_count, len(merged_tracks))
-            # Keep canonical partial metadata intact. A broad title search
-            # here can silently replace it with one song from a different
-            # compilation, which is worse than exposing a recoverable state.
-            return normalized_album
 
-        # Resilient fallback: Search by album title / query if direct album info returned empty
-        album_meta = normalized_album or {}
-        album_title = album_meta.get("name") or album_meta.get("title") or album_id.replace("-", " ").replace("_", " ").strip()
-        clean_query = re.sub(r'[^a-zA-Z0-9\s]+', ' ', album_title).strip()
-        query_candidates = [q for q in (album_title, clean_query) if q]
+            # Resilient fallback: Search by album title / query if direct album info returned empty
+            album_meta = normalized_album or {}
+            album_title = album_meta.get("name") or album_meta.get("title") or album_id.replace("-", " ").replace("_", " ").strip()
+            clean_query = re.sub(r'[^a-zA-Z0-9\s]+', ' ', album_title).strip()
+            query_candidates = [q for q in (album_title, clean_query) if q and not q.isdigit()]
 
-        for query in query_candidates:
-            try:
-                # Try search_albums first
-                album_search = _clean(await self.catalog.search_albums(query, 5))
-                if isinstance(album_search, list) and album_search:
-                    for cand in album_search:
-                        cand_id = str(cand.get("album_id") or cand.get("id") or cand.get("seokey") or "")
-                        if cand_id and cand_id != album_id:
-                            info = _clean(await self.catalog.get_album_info([cand_id], True))
-                            if isinstance(info, list) and info:
-                                norm = album(info[0])
-                                tracks = norm.get("tracks") or norm.get("songs") or []
-                                if norm.get("name") and tracks:
-                                    return norm
-            except Exception as exc:
-                logger.warning("album_details search fallback failed query=%s error=%s", query, exc)
+            for query in query_candidates:
+                try:
+                    album_search = _clean(await asyncio.wait_for(self.catalog.search_albums(query, 5), timeout=2.5))
+                    if isinstance(album_search, list) and album_search:
+                        for cand in album_search:
+                            cand_id = str(cand.get("album_id") or cand.get("id") or cand.get("seokey") or "")
+                            if cand_id and cand_id != album_id:
+                                try:
+                                    info = _clean(await asyncio.wait_for(self.catalog.get_album_info([cand_id], True), timeout=2.5))
+                                    if isinstance(info, list) and info:
+                                        norm = album(info[0])
+                                        tracks = norm.get("tracks") or norm.get("songs") or []
+                                        if norm.get("name") and tracks:
+                                            return norm
+                                except Exception:
+                                    pass
+                except Exception as exc:
+                    logger.warning("album_details search fallback failed query=%s error=%s", query, exc)
 
-            try:
-                # Try search_songs to build album and tracklist
-                song_search = _clean(await self.catalog.search_songs(query, 25))
-                if isinstance(song_search, list) and song_search:
-                    song_items = items(song_search, "song")
-                    if song_items:
-                        first = song_items[0]
-                        first_album_raw = first.get("album")
-                        first_album_name = (
-                            first_album_raw.get("title") or first_album_raw.get("name") or album_title
-                            if isinstance(first_album_raw, dict)
-                            else str(first_album_raw or album_title)
-                        )
-                        first_album_img = (
-                            album_meta.get("image_url")
-                            or (first_album_raw.get("artworkUrl") if isinstance(first_album_raw, dict) else None)
-                            or first.get("image_url") or ""
-                        )
-                        matched_songs = [
-                            s for s in song_items
-                            if (
-                                (isinstance(s.get("album"), dict) and s["album"].get("name", "").lower() == first_album_name.lower())
-                                or str(s.get("album") or "").lower() == first_album_name.lower()
+                try:
+                    song_search = _clean(await asyncio.wait_for(self.catalog.search_songs(query, 25), timeout=2.5))
+                    if isinstance(song_search, list) and song_search:
+                        song_items = items(song_search, "song")
+                        if song_items:
+                            first = song_items[0]
+                            first_album_raw = first.get("album")
+                            first_album_name = (
+                                first_album_raw.get("title") or first_album_raw.get("name") or album_title
+                                if isinstance(first_album_raw, dict)
+                                else str(first_album_raw or album_title)
                             )
-                        ]
-                        resolved_songs = matched_songs if matched_songs else song_items
-                        return {
-                            "id": str(album_meta.get("id") or first.get("album_id") or album_id),
-                            "provider_id": str(album_meta.get("provider_id") or first.get("album_id") or album_id),
-                            "type": "album",
-                            "name": album_title or first_album_name,
-                            "title": album_title or first_album_name,
-                            "image_url": first_album_img,
-                            "imageUrl": first_album_img,
-                            "artworkUrl": first_album_img,
-                            "artists": album_meta.get("artists") or first.get("artists") or [],
-                            "artistNames": album_meta.get("artistNames") or ([first.get("artist") or ""] if first.get("artist") else []),
-                            "artistIds": album_meta.get("artistIds") or [],
-                            "song_count": len(resolved_songs),
-                            "trackCount": len(resolved_songs),
-                            "songs": resolved_songs,
-                            "tracks": resolved_songs,
-                            "language": album_meta.get("language") or "",
-                            "release_date": album_meta.get("release_date"),
-                            "releaseYear": album_meta.get("releaseYear"),
-                        }
-            except Exception as exc:
-                logger.warning("album_details song search fallback failed query=%s error=%s", query, exc)
+                            first_album_img = (
+                                album_meta.get("image_url")
+                                or (first_album_raw.get("artworkUrl") if isinstance(first_album_raw, dict) else None)
+                                or first.get("image_url") or ""
+                            )
+                            first_raw_id = first_album_raw.get("id") if isinstance(first_album_raw, dict) else ""
+                            first_prov_id = first_album_raw.get("provider_id") if isinstance(first_album_raw, dict) else ""
+                            matched_songs = [
+                                s for s in song_items
+                                if (
+                                    (isinstance(s.get("album"), dict) and s["album"].get("name", "").lower() == first_album_name.lower())
+                                    or str(s.get("album") or "").lower() == first_album_name.lower()
+                                    or (isinstance(s.get("album"), dict) and s["album"].get("id") == album_id)
+                                    or (isinstance(s.get("album"), dict) and s["album"].get("provider_id") == album_id)
+                                    or (first_raw_id and isinstance(s.get("album"), dict) and s["album"].get("id") == first_raw_id)
+                                )
+                            ]
+                            resolved_songs = matched_songs if matched_songs else song_items[:12]
+                            return {
+                                "id": str(album_meta.get("id") or first_raw_id or album_id),
+                                "seokey": str(album_meta.get("seokey") or first_raw_id or album_id),
+                                "provider_id": str(album_meta.get("provider_id") or first_prov_id or album_id),
+                                "type": "album",
+                                "name": album_title or first_album_name,
+                                "title": album_title or first_album_name,
+                                "image_url": first_album_img,
+                                "imageUrl": first_album_img,
+                                "artworkUrl": first_album_img,
+                                "artists": album_meta.get("artists") or first.get("artists") or [],
+                                "artistNames": album_meta.get("artistNames") or ([first.get("artist") or ""] if first.get("artist") else []),
+                                "artistIds": album_meta.get("artistIds") or [],
+                                "song_count": len(resolved_songs),
+                                "trackCount": len(resolved_songs),
+                                "songs": resolved_songs,
+                                "tracks": resolved_songs,
+                                "language": album_meta.get("language") or "",
+                                "release_date": album_meta.get("release_date"),
+                                "releaseYear": album_meta.get("releaseYear"),
+                            }
+                except Exception as exc:
+                    logger.warning("album_details song search fallback failed query=%s error=%s", query, exc)
 
-        if normalized_album:
-            return normalized_album
+            if normalized_album:
+                return normalized_album
 
-        return None
+            return None
+
+        return await self._cached(
+            f"catalog:album:{album_id}",
+            getattr(config, "TTL_ALBUM", 21600),
+            load,
+            getattr(config, "STALE_CACHE_TTL", 3600),
+        )
 
     async def album_recommendations(
         self, album_id: str, user_profile: dict[str, Any] | None = None
@@ -1508,84 +1518,6 @@ class CatalogService:
             cache_key,
             config.TTL_ALBUM if hasattr(config, "TTL_ALBUM") else 1800,
             compute_recommendations,
-            config.STALE_CACHE_TTL if hasattr(config, "STALE_CACHE_TTL") else 3600,
-        )
-
-    async def album_details(self, album_id: str) -> dict[str, Any] | None:
-        album_id = (album_id or "").strip()
-        if not album_id:
-            return None
-
-        async def load():
-            # 1. Try get_album_info by seokey or numeric id
-            try:
-                raw = await self.catalog.get_album_info([album_id], True)
-                if isinstance(raw, list) and raw:
-                    first = raw[0]
-                    if isinstance(first, dict) and (first.get("tracks") or first.get("title") or first.get("name")):
-                        return album(first)
-                elif isinstance(raw, dict) and (raw.get("tracks") or raw.get("title") or raw.get("name")):
-                    return album(raw)
-            except Exception as exc:
-                logger.warning("get_album_info failed id=%s error=%s", album_id, exc)
-
-            # 2. Try searching albums by clean query
-            search_query = album_id.replace("-", " ").replace("_", " ")
-            try:
-                search_res = await self.catalog.search_albums(search_query, 5)
-                album_items = items(_clean(search_res), "album")
-                for candidate in album_items:
-                    cand_id = str(candidate.get("id") or candidate.get("seokey") or "")
-                    if cand_id and (cand_id.lower() == album_id.lower() or normalize_query(cand_id) == normalize_query(album_id)):
-                        try:
-                            full_raw = await self.catalog.get_album_info([cand_id], True)
-                            if isinstance(full_raw, list) and full_raw:
-                                return album(full_raw[0])
-                            elif isinstance(full_raw, dict):
-                                return album(full_raw)
-                        except Exception:
-                            pass
-                        return album(candidate)
-            except Exception as exc:
-                logger.warning("search_albums fallback failed query=%s error=%s", search_query, exc)
-
-            # 3. Try finding songs belonging to this album
-            try:
-                song_search = await self.catalog.search_songs(search_query, 25)
-                song_items = [song(s) for s in items(_clean(song_search), "song") if isinstance(s, dict)]
-                matching_songs = [
-                    s for s in song_items
-                    if (s.get("album_id") == album_id or s.get("album_seokey") == album_id or
-                        normalize_query(str(s.get("album") or "")) == normalize_query(search_query))
-                ]
-                if matching_songs:
-                    first = matching_songs[0]
-                    return {
-                        "id": album_id,
-                        "seokey": album_id,
-                        "provider_id": first.get("album_id") or album_id,
-                        "type": "album",
-                        "title": first.get("album") or search_query,
-                        "name": first.get("album") or search_query,
-                        "image_url": first.get("image_url") or "",
-                        "imageUrl": first.get("image_url") or "",
-                        "artworkUrl": first.get("image_url") or "",
-                        "artist": first.get("artist") or "",
-                        "artists": [{"name": first.get("artist") or "", "id": first.get("artist_ids") or ""}],
-                        "track_count": len(matching_songs),
-                        "trackCount": len(matching_songs),
-                        "tracks": matching_songs,
-                        "songs": matching_songs,
-                    }
-            except Exception as exc:
-                logger.warning("search_songs fallback failed query=%s error=%s", search_query, exc)
-
-            return None
-
-        return await self._cached(
-            f"catalog:album:{album_id}",
-            config.TTL_ALBUM if hasattr(config, "TTL_ALBUM") else 21600,
-            load,
             config.STALE_CACHE_TTL if hasattr(config, "STALE_CACHE_TTL") else 3600,
         )
 
