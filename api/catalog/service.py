@@ -1351,61 +1351,100 @@ class CatalogService:
             # JioSaavn fallback: try resolving tracks from JioSaavn when Gaana
             # returns album metadata but no playable tracks.
             album_meta = normalized_album or {}
-            fb_title = album_meta.get("name") or album_meta.get("title") or album_id.replace("-", " ").replace("_", " ").strip()
-            if fb_title:
+            raw_fb_title = (
+                album_meta.get("name")
+                or album_meta.get("title")
+                or album_id.replace("-", " ").replace("_", " ").strip()
+            )
+
+            def _generate_album_query_candidates(title: str) -> list[str]:
+                if not title:
+                    return []
+                raw = " ".join(str(title).split()).strip()
+                if not raw:
+                    return []
+                candidates: list[str] = []
+                # 1. Strip parentheticals / brackets like (Original Motion Picture Soundtrack), (From "XYZ"), [OST], (Deluxe), etc.
+                stripped_parens = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', raw).strip()
+                # 2. Strip standard soundtrack phrases even if not in parens
+                phrase_pattern = r'(?i)\s*(?:original\s+motion\s+picture\s+soundtrack|original\s+soundtrack|motion\s+picture\s+soundtrack|original\s+score|soundtrack|ost)\s*$'
+                stripped_phrases = re.sub(phrase_pattern, '', stripped_parens or raw).strip()
+                # 3. Strip hyphenated / colon sub-headings like "Movie Name - Soundtrack" or "Movie Name : Chapter 1"
+                primary_part = re.split(r'\s*[-:–]\s*', stripped_phrases or stripped_parens or raw)[0].strip()
+                # 4. Clean punctuation version
+                clean_alpha = " ".join(re.sub(r'[^a-zA-Z0-9\s]+', ' ', primary_part or stripped_phrases or raw).split()).strip()
+
+                for c in [primary_part, stripped_phrases, stripped_parens, raw, clean_alpha]:
+                    if c and not c.isdigit() and len(c) >= 2:
+                        if c.lower() not in [x.lower() for x in candidates]:
+                            candidates.append(c)
+                return candidates
+
+            fb_candidates = _generate_album_query_candidates(raw_fb_title)
+
+            # Step A: JioSaavn fallback
+            if fb_candidates:
                 try:
                     from api.stream_fallback import get_stream_fallback_resolver
                     fb_res = get_stream_fallback_resolver()
-                    fb_albums = await asyncio.wait_for(fb_res.search_albums(fb_title, 5), timeout=2.5)
-                    if fb_albums:
-                        for fb_alb in fb_albums:
-                            fb_alb_title = str(fb_alb.get("title") or fb_alb.get("name") or "").lower().strip()
-                            if not fb_alb_title:
-                                continue
-                            # Match on title similarity
-                            if fb_title.lower().strip() in fb_alb_title or fb_alb_title in fb_title.lower().strip():
-                                fb_alb_id = str(fb_alb.get("id") or fb_alb.get("album_id") or "")
-                                if fb_alb_id:
-                                    fb_details = await asyncio.wait_for(fb_res.get_album_details(fb_alb_id), timeout=2.5)
-                                    fb_songs = (fb_details.get("songs") or fb_details.get("tracks") or []) if fb_details else []
-                                    if fb_songs:
-                                        result_album = album_meta.copy() if album_meta else {}
-                                        result_album.update({
-                                            "id": result_album.get("id") or album_id,
-                                            "seokey": result_album.get("seokey") or album_id,
-                                            "tracks": fb_songs,
-                                            "songs": fb_songs,
-                                            "song_count": len(fb_songs),
-                                            "trackCount": len(fb_songs),
-                                            "expected_track_count": len(fb_songs),
-                                            "loaded_track_count": len(fb_songs),
-                                            "is_complete": True,
-                                            "has_more": False,
-                                        })
-                                        if not result_album.get("image_url"):
-                                            fb_img = fb_details.get("image_url") or fb_details.get("artworkUrl") or ""
-                                            if fb_img:
-                                                result_album["image_url"] = fb_img
-                                                result_album["imageUrl"] = fb_img
-                                                result_album["artworkUrl"] = fb_img
-                                        return result_album
+                    for cand_q in fb_candidates[:3]:
+                        try:
+                            fb_albums = await asyncio.wait_for(fb_res.search_albums(cand_q, 6), timeout=3.5)
+                            if fb_albums:
+                                cand_core = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', cand_q).strip().lower()
+                                for fb_alb in fb_albums:
+                                    fb_alb_title = str(fb_alb.get("title") or fb_alb.get("name") or "").strip()
+                                    if not fb_alb_title:
+                                        continue
+                                    fb_alb_core = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', fb_alb_title).strip().lower()
+                                    matched = (
+                                        cand_core == fb_alb_core
+                                        or (cand_core and cand_core in fb_alb_core)
+                                        or (fb_alb_core and fb_alb_core in cand_core)
+                                        or (cand_q.lower() in fb_alb_title.lower())
+                                        or (fb_alb_title.lower() in cand_q.lower())
+                                    )
+                                    if matched:
+                                        fb_alb_id = str(fb_alb.get("id") or fb_alb.get("album_id") or "")
+                                        if fb_alb_id:
+                                            fb_details = await asyncio.wait_for(fb_res.get_album_details(fb_alb_id), timeout=3.5)
+                                            fb_songs = (fb_details.get("songs") or fb_details.get("tracks") or []) if fb_details else []
+                                            if fb_songs:
+                                                result_album = album_meta.copy() if album_meta else {}
+                                                result_album.update({
+                                                    "id": result_album.get("id") or album_id,
+                                                    "seokey": result_album.get("seokey") or album_id,
+                                                    "tracks": fb_songs,
+                                                    "songs": fb_songs,
+                                                    "song_count": len(fb_songs),
+                                                    "trackCount": len(fb_songs),
+                                                    "expected_track_count": len(fb_songs),
+                                                    "loaded_track_count": len(fb_songs),
+                                                    "is_complete": True,
+                                                    "has_more": False,
+                                                })
+                                                if not result_album.get("image_url"):
+                                                    fb_img = fb_details.get("image_url") or fb_details.get("artworkUrl") or ""
+                                                    if fb_img:
+                                                        result_album["image_url"] = fb_img
+                                                        result_album["imageUrl"] = fb_img
+                                                        result_album["artworkUrl"] = fb_img
+                                                return result_album
+                        except Exception as exc:
+                            logger.debug("album_details JioSaavn search attempt failed cand=%s: %s", cand_q, exc)
                 except Exception as exc:
-                    logger.debug("album_details JioSaavn track fallback failed title=%s: %s", fb_title, exc)
+                    logger.debug("album_details JioSaavn track fallback failed title=%s: %s", raw_fb_title, exc)
 
-            # Resilient fallback: Search by album title / query if direct album info returned empty
-            album_title = fb_title
-            clean_query = re.sub(r'[^a-zA-Z0-9\s]+', ' ', album_title).strip()
-            query_candidates = [q for q in (album_title, clean_query) if q and not q.isdigit()]
-
-            for query in query_candidates:
+            # Step B: Resilient fallback: Search by album title / query if direct album info returned empty
+            for query in fb_candidates:
                 try:
-                    album_search = _clean(await asyncio.wait_for(self.catalog.search_albums(query, 5), timeout=2.5))
+                    album_search = _clean(await asyncio.wait_for(self.catalog.search_albums(query, 5), timeout=3.5))
                     if isinstance(album_search, list) and album_search:
                         for cand in album_search:
                             cand_id = str(cand.get("album_id") or cand.get("id") or cand.get("seokey") or "")
                             if cand_id and cand_id != album_id:
                                 try:
-                                    info = _clean(await asyncio.wait_for(self.catalog.get_album_info([cand_id], True), timeout=2.5))
+                                    info = _clean(await asyncio.wait_for(self.catalog.get_album_info([cand_id], True), timeout=3.5))
                                     if isinstance(info, list) and info:
                                         norm = album(info[0])
                                         tracks = norm.get("tracks") or norm.get("songs") or []
@@ -1417,16 +1456,16 @@ class CatalogService:
                     logger.warning("album_details search fallback failed query=%s error=%s", query, exc)
 
                 try:
-                    song_search = _clean(await asyncio.wait_for(self.catalog.search_songs(query, 25), timeout=2.5))
+                    song_search = _clean(await asyncio.wait_for(self.catalog.search_songs(query, 25), timeout=3.5))
                     if isinstance(song_search, list) and song_search:
                         song_items = items(song_search, "song")
                         if song_items:
                             first = song_items[0]
                             first_album_raw = first.get("album")
                             first_album_name = (
-                                first_album_raw.get("title") or first_album_raw.get("name") or album_title
+                                first_album_raw.get("title") or first_album_raw.get("name") or raw_fb_title
                                 if isinstance(first_album_raw, dict)
-                                else str(first_album_raw or album_title)
+                                else str(first_album_raw or raw_fb_title)
                             )
                             first_album_img = (
                                 album_meta.get("image_url")
@@ -1451,8 +1490,8 @@ class CatalogService:
                                 "seokey": str(album_meta.get("seokey") or first_raw_id or album_id),
                                 "provider_id": str(album_meta.get("provider_id") or first_prov_id or album_id),
                                 "type": "album",
-                                "name": album_title or first_album_name,
-                                "title": album_title or first_album_name,
+                                "name": raw_fb_title or first_album_name,
+                                "title": raw_fb_title or first_album_name,
                                 "image_url": first_album_img,
                                 "imageUrl": first_album_img,
                                 "artworkUrl": first_album_img,
