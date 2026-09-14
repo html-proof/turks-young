@@ -96,11 +96,24 @@ def normalize_query(value: str) -> str:
         return ""
     # Strip diacritics / accents
     value = unicodedata.normalize("NFKD", str(value))
-    value = "".join(c for c in value if not unicodedata.combining(c))
+    # Fold Latin accents only. Indic vowel signs/viramas are meaningful letters,
+    # not noise, and must survive normalization and punctuation removal.
+    folded = []
+    latin_base = False
+    for c in value:
+        if unicodedata.category(c).startswith("M"):
+            if not latin_base:
+                folded.append(c)
+        else:
+            latin_base = "LATIN" in unicodedata.name(c, "")
+            folded.append(c)
+    value = "".join(folded)
     value = unicodedata.normalize("NFKC", value)
     value = value.replace("’", "'").replace("‘", "'").replace("`", "'")
     value = _SEPARATORS.sub(" ", value)
-    value = _PUNCTUATION.sub(" ", value.casefold())
+    value = "".join(c if c.isalnum() or c.isspace() or
+                    unicodedata.category(c).startswith("M") else " "
+                    for c in value.casefold())
     return " ".join(value.split())
 
 
@@ -136,14 +149,18 @@ def _levenshtein(s1: str, s2: str) -> int:
     if len(s2) == 0:
         return len(s1)
     prev = list(range(len(s2) + 1))
+    prev_prev = None
     for i, c1 in enumerate(s1):
         curr = [i + 1]
         for j, c2 in enumerate(s2):
             ins = prev[j + 1] + 1
             dele = curr[j] + 1
             subs = prev[j] + (c1 != c2)
-            curr.append(min(ins, dele, subs))
-        prev = curr
+            cost = min(ins, dele, subs)
+            if i > 0 and j > 0 and c1 == s2[j - 1] and s1[i - 1] == c2:
+                cost = min(cost, prev_prev[j - 1] + 1)
+            curr.append(cost)
+        prev_prev, prev = prev, curr
     return prev[-1]
 
 

@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 
-from api.auth import AuthenticatedUser, account_error, get_current_user
+from api.auth import AuthenticatedUser, account_error, get_current_user, invalid_account
 from api.firebase import FirebaseRuntime
 from api.accounts import delete_self
 from api.personalization.models import (
@@ -45,10 +45,9 @@ async def get_user_repository(
         )
     account = await repository.get_account(user.uid)
     if account is None:
-        raise account_error("PROFILE_NOT_FOUND", "No profile exists for this Firebase UID.", 404)
+        raise invalid_account("USER_NOT_FOUND")
     if account and account.get("account_status") != "active":
-        code = "ACCOUNT_DELETED" if account.get("account_status") == "deleted" else "ACCOUNT_UNAVAILABLE"
-        raise account_error(code, "This account is no longer available.")
+        raise invalid_account("ACCOUNT_DISABLED" if account.get("account_status") in ("disabled", "suspended") else "ACCOUNT_DELETED")
     return repository
 
 
@@ -118,8 +117,8 @@ async def remove_favorite(
     repository: FirebaseUserRepository = Depends(get_user_repository),
 ) -> dict[str, bool]:
     deleted = await repository.remove_favorite(user.uid, seokey)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Favorite track not found")
+    # DELETE is idempotent: an offline retry after a lost acknowledgment must
+    # not block the client's remaining pending actions.
     return {"deleted": True}
 
 

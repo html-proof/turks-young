@@ -385,6 +385,8 @@ class AlbumSnapshot(BaseModel):
 class UserPlaylistCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    request_id: str | None = Field(default=None, min_length=1, max_length=100)
+
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
     is_public: bool = False

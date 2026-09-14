@@ -44,6 +44,16 @@ class PersonalizedMusicService:
         self.ranking_engine = RankingEngine()
         self.mix_generator = MixGenerator(repository=repository)
 
+    async def _write_if_active(self, uid: str, write) -> None:
+        try:
+            account = await self.repository.get_session_account(uid)
+            if account and account['account_status'] == 'active':
+                await write()
+        except Exception:
+            # The SQL write barrier is the final authority if deletion starts
+            # after the check. Do not leak SQL parameters in background logs.
+            logger.info('personalization background write skipped')
+
     # ─── Public Recommendation API ────────────────────────────────────────────
 
     async def recommendations(
@@ -85,7 +95,7 @@ class PersonalizedMusicService:
         # Asynchronously persist taste profile to database
         if hasattr(self.repository, "save_taste_profile"):
             try:
-                asyncio.create_task(self.repository.save_taste_profile(uid, taste_profile.model_dump()))
+                asyncio.create_task(self._write_if_active(uid, lambda: self.repository.save_taste_profile(uid, taste_profile.model_dump())))
             except Exception:
                 pass
 
@@ -155,7 +165,7 @@ class PersonalizedMusicService:
         # Asynchronously record impressions for shown items
         if hasattr(self.repository, "record_impressions") and diverse_page:
             try:
-                asyncio.create_task(self.repository.record_impressions(uid, diverse_page, "home_feed"))
+                asyncio.create_task(self._write_if_active(uid, lambda: self.repository.record_impressions(uid, diverse_page, "home_feed")))
             except Exception:
                 pass
 

@@ -131,6 +131,10 @@ class PostgresUserRepository:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT uid, account_status FROM users WHERE firebase_uid=$1", firebase_uid)
+        if not row or row['account_status'] != 'active':
+            resolved = self._uid_cache.pop(firebase_uid, None)
+            if resolved:
+                self._uid_cache.pop(resolved, None)
         return dict(row) if row else None
 
     async def publish_user_cache(self, uid, cache, key, data, ttl, *, stale_ttl=None, snapshot=None):
@@ -222,9 +226,6 @@ class PostgresUserRepository:
                 "(SELECT 1 FROM account_identity_ledger WHERE identity_hash=$1) "
                 "FROM account_lifecycle_epoch",
                 hashlib.sha256(firebase_uid.encode()).hexdigest(), created))
-
-    async def recreate_user(self, user: AuthenticatedUser) -> None:
-        raise ValueError("ACCOUNT_INVALID")
 
     async def bootstrap(self, user: AuthenticatedUser) -> dict[str, Any]:
         account = await self.get_account(user.uid)
@@ -769,11 +770,15 @@ class PostgresUserRepository:
 
     async def create_playlist(self, uid: str, data: UserPlaylistCreate) -> dict[str, Any]:
         uid = await self.resolve_uid(uid)
-        playlist_id = uuid.uuid4()
+        # A retry from the same verified account must not create a duplicate.
+        playlist_id = (uuid.uuid5(uuid.NAMESPACE_URL, f"playlist:{uid}:{data.request_id}")
+                       if data.request_id else uuid.uuid4())
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "INSERT INTO user_playlists (id, uid, name, description, is_public) "
                 "VALUES ($1, $2, $3, $4, $5) "
+                "ON CONFLICT (id) DO UPDATE SET name = user_playlists.name "
+                "WHERE user_playlists.uid = EXCLUDED.uid "
                 "RETURNING id, name, description, is_public, tracks, created_at, updated_at",
                 playlist_id, uid, data.name, data.description, data.is_public,
             )
@@ -1058,9 +1063,6 @@ class PostgresUserRepository:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch("SELECT song_id FROM user_liked_songs WHERE user_id=$1 ORDER BY created_at DESC", uid)
         return [row["song_id"] for row in rows]
-
-    async def delete_account(self, uid: str) -> bool:
-        raise RuntimeError("Use AccountDeletionService.delete_account")
 
     # ── Recent searches ───────────────────────────────────────────────────────
 

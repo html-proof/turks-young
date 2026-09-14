@@ -12,6 +12,7 @@ from firebase_admin.exceptions import UnavailableError
 from api.accounts import router
 from api.auth import get_current_user, get_optional_user
 from api.firebase import FirebaseRuntime
+from api.personalization.models import UserPlaylistCreate
 
 
 @pytest.fixture
@@ -45,6 +46,13 @@ def test_active_account_returns_only_authoritative_uuid(session):
     response = request(client)
     assert response.json() == {'valid': True, 'status': 'ACTIVE', 'user_id': 'uuid-a'}
     repo.get_session_account.assert_awaited_once_with('firebase-a')
+
+
+def test_playlist_retry_key_is_accepted_and_bounded():
+    data = UserPlaylistCreate(name='Road Trip', request_id='pl_123')
+    assert data.request_id == 'pl_123'
+    with pytest.raises(Exception):
+        UserPlaylistCreate(name='Road Trip', request_id='x' * 101)
 
 
 def test_no_local_id_can_authorize_request(session):

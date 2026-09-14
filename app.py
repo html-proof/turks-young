@@ -9,6 +9,7 @@ from collections import deque
 from typing import Optional
 
 import aiohttp
+import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -129,6 +130,8 @@ async def rate_limit_middleware(request: Request, call_next):
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
+    if request.headers.get('Authorization'):
+        response.headers['Cache-Control'] = 'private, no-store'
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "DENY")
@@ -193,6 +196,20 @@ async def firebase_exception_handler(request: Request, exc: firebase_exceptions.
         status_code=503,
         content={"error": "Personalization data source is temporarily unavailable"},
     )
+
+
+@app.exception_handler(asyncpg.CheckViolationError)
+async def account_write_rejected(request: Request, exc: asyncpg.CheckViolationError):
+    if str(exc).startswith('ACCOUNT_INVALID'):
+        return JSONResponse(status_code=401, content={'code': 'ACCOUNT_INVALID', 'reason': 'ACCOUNT_DELETED'})
+    return JSONResponse(status_code=422, content={'error': 'Invalid data'})
+
+
+@app.exception_handler(asyncpg.UniqueViolationError)
+async def account_identity_conflict(request: Request, exc: asyncpg.UniqueViolationError):
+    if exc.constraint_name == 'account_identity_ledger_pkey':
+        return JSONResponse(status_code=401, content={'code': 'ACCOUNT_INVALID', 'reason': 'ACCOUNT_DELETED'})
+    return JSONResponse(status_code=409, content={'error': 'Record already exists'})
 
 # ---------------------------------------------------------------------------
 # Application state
