@@ -360,63 +360,73 @@ class CatalogService:
         languages = self.languages.resolve(language_ids)
         if not languages:
             return {"items": [], "next_cursor": None, "has_more": False, "language_ids": []}
-        requested_offset = 0
-        if cursor:
-            try:
-                requested_offset = int(base64.urlsafe_b64decode(cursor.encode()).decode())
-            except (ValueError, UnicodeDecodeError, base64.binascii.Error):
-                requested_offset = 0
-        per_language = min(max(limit * 3, 60), 180)
-        language_results = await asyncio.gather(*[
-            self._artist_candidates_for_language(language, per_language, limit + 1) for language in languages
-        ])
-        buckets: list[list[dict[str, Any]]] = []
-        for language, values in zip(languages, language_results):
-            unique: dict[str, dict[str, Any]] = {}
-            for value in values:
-                key = str(value.get("id") or normalize_query(str(value.get("name") or "")))
-                if key and key not in unique:
-                    enriched = dict(value)
-                    enriched["languages"] = [language.id]
-                    unique[key] = enriched
-            buckets.append(list(unique.values()))
-        # Round-robin keeps one globally popular language from filling the page.
-        merged: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        index = 0
-        while True:
-            added = False
-            for bucket in buckets:
-                if index < len(bucket):
-                    value = bucket[index]
+
+        async def load():
+            requested_offset = 0
+            if cursor:
+                try:
+                    requested_offset = int(base64.urlsafe_b64decode(cursor.encode()).decode())
+                except (ValueError, UnicodeDecodeError, base64.binascii.Error):
+                    requested_offset = 0
+            per_language = min(max(limit * 3, 60), 180)
+            language_results = await asyncio.gather(*[
+                self._artist_candidates_for_language(language, per_language, limit + 1) for language in languages
+            ])
+            buckets: list[list[dict[str, Any]]] = []
+            for language, values in zip(languages, language_results):
+                unique: dict[str, dict[str, Any]] = {}
+                for value in values:
                     key = str(value.get("id") or normalize_query(str(value.get("name") or "")))
-                    if key not in seen:
-                        seen.add(key)
-                        merged.append(value)
-                    else:
-                        existing = next(item for item in merged if str(item.get("id") or normalize_query(str(item.get("name") or ""))) == key)
-                        existing["languages"] = sorted(set(existing.get("languages", [])) | set(value.get("languages", [])))
-                    added = True
-            if not added:
-                break
-            index += 1
-        page = merged[requested_offset:requested_offset + limit]
-        for item in page:
-            img = str(item.get("image_url") or item.get("imageUrl") or "").strip()
-            if "dzcdn.net" in img or "placeholder" in img or img.startswith("{"):
-                item["image_url"] = ""
-                item["imageUrl"] = ""
-        before_images = sum(1 for value in page if value.get("image_url") or value.get("imageUrl"))
-        page = await self._hydrate_artist_images(page)
-        self._async_persist_artists(page)
-        after_images = sum(1 for value in page if value.get("image_url") or value.get("imageUrl"))
-        # Candidate responses already include provider artwork. Avoid an extra
-        # per-page provider request on the onboarding critical path.
-        next_offset = requested_offset + len(page)
-        has_more = next_offset < len(merged)
-        next_cursor = base64.urlsafe_b64encode(str(next_offset).encode()).decode() if has_more else None
-        logger.info("artist_discovery languages=%s before=%d after=%d offset=%d images_before=%d images_after=%d", [l.id for l in languages], sum(map(len, language_results)), len(merged), requested_offset, before_images, after_images)
-        return {"items": page, "next_cursor": next_cursor, "has_more": has_more, "language_ids": [l.id for l in languages]}
+                    if key and key not in unique:
+                        enriched = dict(value)
+                        enriched["languages"] = [language.id]
+                        unique[key] = enriched
+                buckets.append(list(unique.values()))
+            # Round-robin keeps one globally popular language from filling the page.
+            merged: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            index = 0
+            while True:
+                added = False
+                for bucket in buckets:
+                    if index < len(bucket):
+                        value = bucket[index]
+                        key = str(value.get("id") or normalize_query(str(value.get("name") or "")))
+                        if key not in seen:
+                            seen.add(key)
+                            merged.append(value)
+                        else:
+                            existing = next(item for item in merged if str(item.get("id") or normalize_query(str(item.get("name") or ""))) == key)
+                            existing["languages"] = sorted(set(existing.get("languages", [])) | set(value.get("languages", [])))
+                        added = True
+                if not added:
+                    break
+                index += 1
+            page = merged[requested_offset:requested_offset + limit]
+            for item in page:
+                img = str(item.get("image_url") or item.get("imageUrl") or "").strip()
+                if "dzcdn.net" in img or "placeholder" in img or img.startswith("{"):
+                    item["image_url"] = ""
+                    item["imageUrl"] = ""
+            before_images = sum(1 for value in page if value.get("image_url") or value.get("imageUrl"))
+            page = await self._hydrate_artist_images(page)
+            self._async_persist_artists(page)
+            after_images = sum(1 for value in page if value.get("image_url") or value.get("imageUrl"))
+            # Candidate responses already include provider artwork. Avoid an extra
+            # per-page provider request on the onboarding critical path.
+            next_offset = requested_offset + len(page)
+            has_more = next_offset < len(merged)
+            next_cursor = base64.urlsafe_b64encode(str(next_offset).encode()).decode() if has_more else None
+            logger.info("artist_discovery languages=%s before=%d after=%d offset=%d images_before=%d images_after=%d", [l.id for l in languages], sum(map(len, language_results)), len(merged), requested_offset, before_images, after_images)
+            return {"items": page, "next_cursor": next_cursor, "has_more": has_more, "language_ids": [l.id for l in languages]}
+
+        lang_key = ",".join(sorted(l.id for l in languages))
+        return await self._cached(
+            f"music:artist_page:{lang_key}:{limit}:{cursor or ''}:v1",
+            config.TTL_ARTIST_DISCOVERY,
+            load,
+            config.STALE_CACHE_TTL,
+        )
 
     async def artists_for_languages(self, language_ids: list[str], limit: int) -> list[dict[str, Any]]:
         return (await self.artist_page(language_ids, limit))["items"]
@@ -1096,27 +1106,9 @@ class CatalogService:
 
             artist_name = normalized_artist.get("name") or artist_id
             album_list = []
-            album_queries = [
-                artist_name,
-                re.sub(r'^[a-zA-Z][\.\s]+', '', artist_name).strip(),
-                artist_id.replace('-', ' '),
-            ]
             seen_album_titles = set()
-            unique_queries = [aq for aq in album_queries if aq and len(aq) > 1][:2]
 
-            album_results = await asyncio.gather(*[
-                self.catalog.search_albums(aq, 10) for aq in unique_queries
-            ], return_exceptions=True)
-
-            for raw_albums in album_results:
-                if isinstance(raw_albums, list):
-                    for a in items(_clean(raw_albums), "album"):
-                        title_key = (a.get("name") or a.get("title") or "").lower().strip()
-                        if title_key and title_key not in seen_album_titles:
-                            seen_album_titles.add(title_key)
-                            album_list.append(a)
-
-            # Also extract unique albums from top_tracks if needed
+            # Fast album gathering: extract unique albums directly from top_tracks (0ms!)
             for t in raw.get("top_tracks", []):
                 alb_id = str(t.get("album_id") or t.get("album_seokey") or "")
                 alb_title = t.get("album") or ""
@@ -1134,6 +1126,31 @@ class CatalogService:
                         "release_date": t.get("release_date", ""),
                         "language": t.get("language", ""),
                     })
+
+            # If top_tracks didn't provide enough albums, supplement via search_albums with a strict 2s timeout
+            if len(album_list) < 5:
+                album_queries = [
+                    artist_name,
+                    re.sub(r'^[a-zA-Z][\.\s]+', '', artist_name).strip(),
+                    artist_id.replace('-', ' '),
+                ]
+                unique_queries = [aq for aq in album_queries if aq and len(aq) > 1][:2]
+                try:
+                    album_results = await asyncio.wait_for(
+                        asyncio.gather(*[
+                            self.catalog.search_albums(aq, 10) for aq in unique_queries
+                        ], return_exceptions=True),
+                        timeout=2.0,
+                    )
+                    for raw_albums in album_results:
+                        if isinstance(raw_albums, list):
+                            for a in items(_clean(raw_albums), "album"):
+                                title_key = (a.get("name") or a.get("title") or "").lower().strip()
+                                if title_key and title_key not in seen_album_titles:
+                                    seen_album_titles.add(title_key)
+                                    album_list.append(a)
+                except Exception:
+                    pass
 
             return {
                 "artist": normalized_artist,
