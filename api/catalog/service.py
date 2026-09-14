@@ -819,15 +819,21 @@ class CatalogService:
                     return await asyncio.wait_for(m(effective_query, preview), timeout=2.2)
                 except Exception as exc:
                     logger.debug("Provider search method failed: %s", exc)
-                    return []
+                    return exc
 
             tasks = [safe_search(method) for method in methods.values()] + [fetch_saavn()]
             res = await asyncio.gather(*tasks, return_exceptions=True)
+            # A provider outage is not a successful negative search. Let the
+            # request fail (and the client retry) rather than caching no matches.
+            if any(isinstance(r, Exception) for r in res) and not any(
+                isinstance(r, list) and r for r in res
+            ):
+                raise TimeoutError("Search providers unavailable; please retry")
             return [
                 [] if isinstance(r, Exception) or (isinstance(r, dict) and "error" in r) else r
                 for r in res
             ]
-        results = await self._cached(f"music:search:all:{effective_query}:{preview}:v14", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+        results = await self._cached(f"music:search:all:{effective_query}:{preview}:v15", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
 
         try:
             user_languages, user_artists, history_tracks, previous_searches = await asyncio.wait_for(personalization_task, timeout=0.08)

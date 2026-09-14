@@ -24,3 +24,15 @@ async def test_album_timeout_returns_response_and_next_request_retries():
     await service.search('Sagar alias jacky', 'album', 1, 50)
     await service.search('Sagar alias jacky', 'album', 1, 50)
     assert catalog.search_albums.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_multi_search_outage_is_not_cached_as_no_results():
+    catalog = Mock()
+    for name in ('search_songs', 'search_artists', 'search_albums', 'search_playlists'):
+        setattr(catalog, name, AsyncMock(side_effect=TimeoutError()))
+    service = CatalogService(catalog, LanguageCatalog([]), RedisCache('', ''))
+    for _ in range(2):
+        with pytest.raises(TimeoutError, match='Search providers unavailable'):
+            await service.search('Mudhalvan', None, 1, 15)
+    assert catalog.search_songs.await_count == 2
