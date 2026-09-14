@@ -464,6 +464,7 @@ class CatalogService:
 
     async def search(self, query: str, kind: str | None, page: int, limit: int, user_uid: str | None = None) -> dict[str, Any]:
         t_start = time.monotonic()
+        provider_timed_out = False
         from api.catalog.search.parser import AdvancedQueryParser
         parsed_query = AdvancedQueryParser.parse(query)
 
@@ -577,7 +578,14 @@ class CatalogService:
             else:
                 async def load():
                     return _clean(await asyncio.wait_for(methods[kind](effective_query, requested), timeout=2.2))
-                result = await self._cached(f"music:search:{kind}:{effective_query}:{requested}:v12", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+                try:
+                    result = await self._cached(f"music:search:{kind}:{effective_query}:{requested}:v12", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+                except TimeoutError:
+                    # Keep timeout responses outside the cache so a transient
+                    # provider outage does not hide later successful results.
+                    logger.warning("catalog search provider timeout kind=%s", kind)
+                    provider_timed_out = True
+                    result = []
                 try:
                     user_languages, user_artists, history_tracks, previous_searches = await asyncio.wait_for(personalization_task, timeout=0.08)
                 except Exception:
@@ -735,7 +743,8 @@ class CatalogService:
                 "has_more": len(normalized) > start + limit,
                 "type": kind,
             }
-            self._search_mem_cache[mem_key] = (now, res_payload)
+            if not provider_timed_out:
+                self._search_mem_cache[mem_key] = (now, res_payload)
             return res_payload
 
         # Multi-search (all categories combined)

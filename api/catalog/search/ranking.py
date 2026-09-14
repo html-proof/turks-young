@@ -143,6 +143,39 @@ def _text(item: dict[str, Any], kind: str) -> tuple[str, str, str]:
     return title, artist_text, album_text
 
 
+_ARTIST_SPLIT_REGEX = re.compile(
+    r"[,/&]|\bfeat\.?\b|\bfeaturing\b|\bft\.?\b|\bwith\b",
+    re.IGNORECASE,
+)
+
+
+def _artist_names(item: dict[str, Any], kind: str = "song") -> set[str]:
+    _, artists_text, _ = _text(item, kind)
+    if not artists_text:
+        return set()
+    parts = _ARTIST_SPLIT_REGEX.split(artists_text)
+    names = set()
+    for p in parts:
+        norm = normalize_query(p)
+        if norm and len(norm) >= 3:
+            names.add(norm)
+    return names
+
+
+def _shares_artist(item1: dict[str, Any], item2: dict[str, Any]) -> bool:
+    names1 = _artist_names(item1)
+    names2 = _artist_names(item2)
+    if not names1 or not names2:
+        return False
+    if names1 & names2:
+        return True
+    return any(
+        _is_phonetic_match(n1, n2) or (len(n1) >= 4 and len(n2) >= 4 and (n1 in n2 or n2 in n1))
+        for n1 in names1
+        for n2 in names2
+    )
+
+
 def _levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
         return _levenshtein(s2, s1)
@@ -770,18 +803,33 @@ def _word_match(query: str, item: dict[str, Any], kind: str) -> bool:
     return False
 
 
+_COMPILATION_ALBUM_PATTERNS = re.compile(
+    r"\b(hits|best of|all time|compilation|collection|anthology|vol\b|volume\b|blast|love songs|soulful|greatest|tribute|celebration|party mix|recall|playlist)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_compilation_album(album: Any) -> bool:
+    if isinstance(album, dict):
+        title = str(album.get("title") or album.get("name") or "")
+    else:
+        title = str(album or "")
+    return bool(_COMPILATION_ALBUM_PATTERNS.search(title))
+
+
 def canonical_song_key(item: dict[str, Any], kind: str) -> str:
     """Generates a canonical identity key for deduplicating identical tracks across releases/providers."""
     title, artists, album_val = _text(item, kind)
     norm_t = normalize_query(title)
+    if kind == "song":
+        sec = _duration_seconds(item)
+        dur_bucket = round(sec / 10.0) if sec else 0
+        names = sorted(_artist_names(item, "song"))
+        primary_art = names[0] if names else normalize_query(artists.split(",")[0] if artists else "")
+        return f"{norm_t}::{primary_art}::{dur_bucket}"
     primary_art = normalize_query(artists.split(",")[0] if artists else "")
     norm_al = normalize_query(album_val)
-    dur = item.get("duration") or item.get("duration_seconds") or 0
-    try:
-        dur_bucket = round(float(dur) / 10.0)
-    except (TypeError, ValueError):
-        dur_bucket = 0
-    return f"{norm_t}::{primary_art}::{norm_al}::{dur_bucket}"
+    return f"{norm_t}::{primary_art}::{norm_al}"
 
 
 _semantic_fingerprint = canonical_song_key
@@ -800,14 +848,13 @@ def _isrc_identity(item: dict[str, Any]) -> str:
 
 
 def _semantic_base(item: dict[str, Any]) -> str:
-    title, artists, album_val = _text(item, "song")
+    title, artists, _ = _text(item, "song")
     return "::".join((normalize_query(title),
-                        normalize_query(artists.split(",")[0] if artists else ""),
-                        normalize_query(album_val)))
+                      normalize_query(artists.split(",")[0] if artists else "")))
 
 
 def _duration_seconds(item: dict[str, Any]) -> int:
-    value = item.get("duration_seconds") or item.get("duration") or item.get("duration_ms") or 0
+    value = item.get("duration_seconds") or item.get("duration") or item.get("duration_ms") or item.get("durationMs") or 0
     try:
         value = float(value)
         return int(value / 1000) if value > 10000 else int(value)
@@ -838,6 +885,15 @@ def _merge_stream_data(primary: dict[str, Any], duplicate: dict[str, Any]) -> No
 def _merge_song_record(primary: dict[str, Any], duplicate: dict[str, Any]) -> dict[str, Any]:
     merged = dict(primary)
     _merge_stream_data(merged, duplicate)
+
+    prim_is_comp = _is_compilation_album(merged.get("album"))
+    dup_is_comp = _is_compilation_album(duplicate.get("album"))
+
+    if prim_is_comp and not dup_is_comp and duplicate.get("album"):
+        for field in ("album", "title", "artist", "artists", "image_url", "imageUrl", "artworkUrl", "images", "artist_image", "artistImage"):
+            if duplicate.get(field):
+                merged[field] = duplicate[field]
+
     for field in ("image_url", "imageUrl", "artworkUrl", "album", "language", "duration", "duration_seconds", "duration_ms", "isrc"):
         if not merged.get(field) and duplicate.get(field):
             merged[field] = duplicate[field]
@@ -851,6 +907,7 @@ def merge_song_duplicates(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_track: dict[str, int] = {}
     by_isrc: dict[str, int] = {}
     by_semantic: dict[str, list[int]] = {}
+    by_title: dict[str, list[int]] = {}
     for raw in values:
         if not isinstance(raw, dict):
             continue
@@ -859,19 +916,37 @@ def merge_song_duplicates(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         item = dict(raw)
         track_key, isrc, base, seconds = _track_identity(item), _isrc_identity(item), _semantic_base(item), _duration_seconds(item)
+        norm_t = normalize_query(title)
         target = by_track.get(track_key) if track_key else None
         if target is None and isrc:
             target = by_isrc.get(isrc)
         if target is None and base:
             for candidate in by_semantic.get(base, []):
                 prior_seconds = _duration_seconds(merged[candidate])
-                if not seconds or not prior_seconds or abs(prior_seconds - seconds) <= 3:
+                if not seconds or not prior_seconds or abs(prior_seconds - seconds) <= 6:
                     target = candidate
                     break
+        if target is None and norm_t:
+            for candidate in by_title.get(norm_t, []):
+                cand = merged[candidate]
+                cand_alb = cand.get("album")
+                item_alb = item.get("album")
+                cand_is_comp = _is_compilation_album(cand_alb)
+                item_is_comp = _is_compilation_album(item_alb)
+                same_album = normalize_query(str(cand_alb or "")) == normalize_query(str(item_alb or ""))
+                if cand_is_comp or item_is_comp or not cand_alb or not item_alb or same_album:
+                    if _shares_artist(cand, item):
+                        prior_seconds = _duration_seconds(cand)
+                        if not seconds or not prior_seconds or abs(prior_seconds - seconds) <= 6:
+                            target = candidate
+                            break
         if target is None:
             target = len(merged)
             merged.append(item)
-            by_semantic.setdefault(base, []).append(target)
+            if base:
+                by_semantic.setdefault(base, []).append(target)
+            if norm_t:
+                by_title.setdefault(norm_t, []).append(target)
         else:
             merged[target] = _merge_song_record(merged[target], item)
         if track_key:

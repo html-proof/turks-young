@@ -31,3 +31,18 @@ def test_live_version_is_not_merged_with_original():
         _track("https://cdn.example/live", track_id="124", title="Appadi Podu - Live"),
     ])
     assert len(merged) == 2
+
+
+def test_compilation_album_duplicates_merge_into_original_album():
+    tracks = [
+        {"id": "c1", "title": "Kesariya", "artists": [{"name": "Pritam, Arijit Singh"}], "album": "Pritam (All Time Hits)", "duration": 268, "stream_url": "https://cdn.example/c1"},
+        {"id": "orig", "title": "Kesariya", "artists": [{"name": "Pritam, Arijit Singh"}], "album": "Brahmastra", "duration": 268, "stream_url": "https://cdn.example/orig"},
+        {"id": "c2", "title": "Kesariya", "artists": [{"name": "Pritam, Arijit Singh"}], "album": "Dance Blast", "duration": 268, "stream_url": "https://cdn.example/c2"},
+    ]
+    merged = merge_song_duplicates(tracks)
+    assert len(merged) == 1
+    assert merged[0]["album"] == "Brahmastra"
+    ranked = rank("Kesariya", tracks, "song", 10)
+    assert len(ranked) == 1
+    assert ranked[0]["album"] == "Brahmastra"
+

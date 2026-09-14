@@ -110,6 +110,8 @@ class RedisCache:
         return res
 
     async def get_or_set(self, key: str, loader, ttl: int, stale_ttl: int | None = None) -> Any:
+        loader_started = False
+        loader_completed = False
         try:
             value, fresh = await self.get_with_stale(key)
             if value is not None:
@@ -127,11 +129,20 @@ class RedisCache:
                 value, _ = await self.get_with_stale(key)
                 if value is not None:
                     return value
+                loader_started = True
                 value = await self._eval_loader(loader)
+                loader_completed = True
                 await self.set_with_stale(key, value, ttl, stale_ttl)
                 return value
         except Exception as exc:
-            logger.warning("cache get_or_set fallback key=%s error=%s", key, exc)
+            if loader_started and not loader_completed:
+                # Provider failures are not cache failures. Never execute a
+                # failed loader twice (including timeouts).
+                raise
+            logger.warning("cache get_or_set fallback key=%s error_type=%s error=%s",
+                           key, type(exc).__name__, str(exc) or "(no message)")
+            if loader_completed:
+                return value
             return await self._eval_loader(loader)
 
     async def _refresh(self, key: str, loader, ttl: int, stale_ttl: int | None, lock: asyncio.Lock) -> None:

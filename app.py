@@ -540,6 +540,8 @@ async def songs_info(
     if seokey and (seokey.startswith("saavn:") or seokey.startswith("saavn-")):
         if fallback_res:
             fb = await fallback_res.resolve_stream(seokey, (artist or "").strip())
+            if (not fb or not fb.get("stream_url")) and title:
+                fb = await fallback_res.resolve_stream(title.strip(), (artist or "").strip())
             if fb and fb.get("stream_url"):
                 saavn_track = {
                     "seokey": fb.get("seokey") or seokey,
