@@ -17,10 +17,8 @@ jobs:
         env:
           RENDER_HEALTH_URL: ${{ secrets.RENDER_HEALTH_URL }}
         run: |
-          if [ -z "$RENDER_HEALTH_URL" ]; then
-            echo "RENDER_HEALTH_URL repository secret is not configured."
-            exit 1
-          fi
+          TARGET_URL="${RENDER_HEALTH_URL:-https://turks-young.onrender.com/health}"
+          echo "Pinging Render health endpoint at $TARGET_URL..."
 
           HTTP_CODE=$(curl \
             --silent \
@@ -30,7 +28,7 @@ jobs:
             --connect-timeout 15 \
             --output /dev/null \
             --write-out "%{http_code}" \
-            "$RENDER_HEALTH_URL")
+            "$TARGET_URL")
 
           echo "Render health endpoint returned HTTP $HTTP_CODE"
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 400 ]; then

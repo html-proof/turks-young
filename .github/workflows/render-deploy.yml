@@ -19,8 +19,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$RENDER_DEPLOY_HOOK" ]; then
-            echo "RENDER_DEPLOY_HOOK repository secret is not configured."
-            exit 1
+            echo "RENDER_DEPLOY_HOOK repository secret is not configured. Skipping deploy webhook trigger."
+            exit 0
           fi
 
           echo "Triggering Render deploy hook..."

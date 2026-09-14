@@ -651,6 +651,11 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         "stream_url": stream_final,
         "stream_urls": item.get("stream_urls") or ({"urls": streams} if streams else None),
         "variants": _verified_audio_variants(item),
+        "sample_rate": _int(item.get("sample_rate")) or 44100,
+        "bit_depth": _int(item.get("bit_depth")) or 16,
+        "channels": _int(item.get("channels")) or 2,
+        "codec": str(item.get("codec") or "aac").lower(),
+        "available_bitrates": [24, 48, 64, 96, 128, 160, 192, 256, 320, 360],
         "lyrics_url": f"/api/v1/tracks/{item.get('seokey')}/lyrics" if item.get("seokey") else None,
     }
 

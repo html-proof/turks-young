@@ -20,6 +20,7 @@ const TTL_RULES = [
   [/^\/songs\/info\//, 1800],
   [/^\/(albums|artists)\/info\//, 21600],
   [/^\/(artists|albums)\/(similar|tracks)\//, 21600],
+  [/^\/(?:api\/)?songs\/[^\/]+\/stream-info/, 86400],
 ];
 
 const HOP_BY_HOP = [

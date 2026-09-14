@@ -608,6 +608,59 @@ async def songs_info(
 
     return result
 
+
+@app.get("/songs/{song_id}/stream-info", summary="Calculate bandwidth and data consumption variants for a song.")
+@app.get("/api/songs/{song_id}/stream-info", summary="Calculate bandwidth and data consumption variants for a song.")
+async def songs_stream_info(
+    request: Request,
+    song_id: str = Path(..., min_length=1, max_length=500),
+    duration: Optional[int] = Query(None, ge=1, le=7200),
+):
+    dur = duration
+    if not dur:
+        cache = _cache(request)
+        cached = await cache.get(f"songs:info:{song_id}")
+        if isinstance(cached, list) and cached and cached[0].get("duration"):
+            try:
+                dur = int(float(cached[0]["duration"]))
+            except (ValueError, TypeError):
+                dur = 237
+        else:
+            dur = 237
+
+    bitrates = [
+        (24, "dataSaver"),
+        (48, "low"),
+        (64, "low_alt"),
+        (96, "normal"),
+        (128, "medium"),
+        (160, "high"),
+        (192, "high_alt"),
+        (256, "high_plus"),
+        (320, "veryHigh"),
+        (360, "custom"),
+    ]
+    variants = [
+        {
+            "bitrate": b,
+            "quality": q,
+            "estimatedMb": round((b * dur) / (8 * 1000), 3),
+        }
+        for b, q in bitrates
+    ]
+    return {
+        "songId": song_id,
+        "duration": dur,
+        "audio": {
+            "codec": "aac",
+            "sampleRate": 44100,
+            "bitDepth": 16,
+            "channels": 2,
+            "variants": variants,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Albums
 # ---------------------------------------------------------------------------
