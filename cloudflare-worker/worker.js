@@ -125,6 +125,22 @@ export default {
           headers,
         });
       }
+
+      if (url.pathname.startsWith("/api/albums/")) {
+        const response = await fetch(upstreamRequest);
+        try {
+          const cloned = response.clone();
+          const json = await cloned.json();
+          const alb = json.data || json;
+          const tracks = alb.tracks || alb.songs || [];
+          if (!Array.isArray(tracks) || tracks.length === 0) {
+            const outgoing = responseHeaders(response.headers, request, env, "BYPASS");
+            outgoing.set("Cache-Control", "no-store, no-cache, must-revalidate");
+            return new Response(response.body, { status: response.status, headers: outgoing });
+          }
+        } catch (_) {}
+      }
+
       const response = await fetch(upstreamRequest, {
         cf: {
           cacheEverything: true,

@@ -199,6 +199,7 @@ async def test_album_details_numeric_jiosaavn_lookup(service, mock_catalog, monk
             }
         ]
     })
+    mock_catalog.get_album_info = AsyncMock(return_value=[])
     monkeypatch.setattr("api.stream_fallback.get_stream_fallback_resolver", lambda: mock_resolver)
 
     res = await service.album_details("58371014")

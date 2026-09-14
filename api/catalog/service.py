@@ -168,6 +168,12 @@ class CatalogService:
         started = time.perf_counter()
         if self.cache is not None and hasattr(self.cache, "get_or_set"):
             value = await self.cache.get_or_set(key, loader, ttl, stale_ttl)
+            if value is None or (isinstance(value, dict) and value.get("type") == "album" and not value.get("tracks") and not value.get("songs")):
+                try:
+                    if hasattr(self.cache, "delete"):
+                        await self.cache.delete(key)
+                except Exception:
+                    pass
         else:
             value = await loader()
         logger.info("catalog_timing key=%s total_ms=%.1f cache=%s", key, (time.perf_counter() - started) * 1000, bool(self.cache))
@@ -1307,7 +1313,7 @@ class CatalogService:
             return None
 
         async def load() -> dict[str, Any] | None:
-            if album_id.startswith("saavn") or album_id.isdigit():
+            if album_id.startswith("saavn"):
                 try:
                     from api.stream_fallback import get_stream_fallback_resolver
                     fb_res = get_stream_fallback_resolver()
@@ -1465,7 +1471,7 @@ class CatalogService:
                     album_search = _clean(await asyncio.wait_for(self.catalog.search_albums(query, 5), timeout=3.5))
                     if isinstance(album_search, list) and album_search:
                         for cand in album_search:
-                            cand_id = str(cand.get("album_id") or cand.get("id") or cand.get("seokey") or "")
+                            cand_id = str(cand.get("album_seokey") or cand.get("seokey") or cand.get("id") or cand.get("album_id") or "")
                             if cand_id and cand_id != album_id:
                                 try:
                                     info = _clean(await asyncio.wait_for(self.catalog.get_album_info([cand_id], True), timeout=3.5))
@@ -1537,19 +1543,31 @@ class CatalogService:
             if normalized_album and (normalized_album.get("tracks") or normalized_album.get("songs")):
                 return normalized_album
 
-            if normalized_album:
-                normalized_album["is_complete"] = False
-                normalized_album["has_more"] = True
-                return normalized_album
+            # If album_id is numeric and Gaana returned no tracks, try JioSaavn direct lookup as fallback
+            if album_id.isdigit():
+                try:
+                    from api.stream_fallback import get_stream_fallback_resolver
+                    fb_res = get_stream_fallback_resolver()
+                    saavn_alb = await fb_res.get_album_details(album_id)
+                    if saavn_alb and (saavn_alb.get("songs") or saavn_alb.get("tracks")):
+                        return album(saavn_alb)
+                except Exception as exc:
+                    logger.debug("JioSaavn numeric album_details fallback failed for %s: %s", album_id, exc)
 
+            # Never return a 200 OK with zero tracks when an album is requested!
+            # Returning a 0-track payload causes Cloudflare and clients to cache a broken empty state.
             return None
 
+        async def load_with_guard() -> dict[str, Any] | None:
+            res = await load()
+            if not res or not (res.get("tracks") or res.get("songs")):
+                return None
+            return res
+
         return await self._cached(
-            # Older cache entries may contain album metadata without a usable
-            # track list.  Use a new namespace so the album page refetches it.
-            f"catalog:album:{album_id}:tracks-v2",
+            f"catalog:album:{album_id}:tracks-v3",
             getattr(config, "TTL_ALBUM", 21600),
-            load,
+            load_with_guard,
             getattr(config, "STALE_CACHE_TTL", 3600),
         )
 
