@@ -131,7 +131,7 @@ class Songs:
             return await errors.no_results()
         return track_info
 
-    async def format_json_songs(self, results: dict) -> dict:
+    async def format_json_songs(self, results: dict, *, resolve_stream: bool = True) -> dict:
         functions = self.functions
         errors = self.errors
         data = {}
@@ -234,7 +234,7 @@ class Songs:
         )
 
         # Fallback stream resolution if Gaana has no playable audio stream
-        if not data['stream_url'] and data.get('title'):
+        if resolve_stream and not data['stream_url'] and data.get('title'):
             fallback_res = getattr(self, "_fallback_resolver", None)
             if not fallback_res:
                 try:

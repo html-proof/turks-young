@@ -130,7 +130,10 @@ class Albums:
                             effective_seokey = fallback_id
 
                     if effective_seokey:
-                        formatted = await self.format_json_songs(t)
+                        # Listing an album must not perform a serial external
+                        # audio search for every track. Playback resolves a
+                        # missing stream when the user selects that track.
+                        formatted = await self.format_json_songs(t, resolve_stream=False)
                         if isinstance(formatted, dict) and 'error' not in formatted:
                             formatted_tracks.append(formatted)
                         else:
