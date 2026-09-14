@@ -1515,7 +1515,9 @@ class CatalogService:
             return None
 
         return await self._cached(
-            f"catalog:album:{album_id}",
+            # Older cache entries may contain album metadata without a usable
+            # track list.  Use a new namespace so the album page refetches it.
+            f"catalog:album:{album_id}:tracks-v2",
             getattr(config, "TTL_ALBUM", 21600),
             load,
             getattr(config, "STALE_CACHE_TTL", 3600),
