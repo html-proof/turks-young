@@ -13,7 +13,7 @@ FIELDS = (
 def normalize_url(value, provider_base=None):
     if not isinstance(value, str):
         return None
-    value = value.strip().replace("&amp;", "&")
+    value = value.strip().replace("&amp;", "&").replace(" ", "%20")
     if value.startswith("//"):
         value = "https:" + value
     elif value.startswith("/") and provider_base:

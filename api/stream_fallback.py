@@ -275,7 +275,28 @@ class StreamFallbackResolver:
             if not primary_stream:
                 return {}
 
+            img_url = best_item.get("image") or ""
+            if img_url.startswith("http://"):
+                img_url = "https://" + img_url[7:]
+            large_artwork = re.sub(r"[-_](?:50x50|80x80|150x150|250x250|320x320)", "-500x500", img_url) if img_url else ""
+
             result_dict = {
+                "id": f"saavn:{best_item.get('id')}",
+                "track_id": f"saavn:{best_item.get('id')}",
+                "title": best_item.get("song") or best_item.get("title") or clean_title,
+                "artist": best_item.get("primary_artists") or best_item.get("singers") or artist,
+                "album": best_item.get("album") or "",
+                "duration": str(best_item.get("duration") or "180"),
+                "image_url": large_artwork or img_url,
+                "imageUrl": large_artwork or img_url,
+                "artworkUrl": large_artwork or img_url,
+                "images": {
+                    "urls": {
+                        "large_artwork": large_artwork or img_url,
+                        "medium_artwork": img_url,
+                        "small_artwork": img_url,
+                    }
+                },
                 "stream_url": primary_stream,
                 "stream_urls": {
                     "urls": stream_dict

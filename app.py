@@ -543,6 +543,7 @@ async def songs_info(
             if (not fb or not fb.get("stream_url")) and title:
                 fb = await fallback_res.resolve_stream(title.strip(), (artist or "").strip())
             if fb and fb.get("stream_url"):
+                img = fb.get("image_url") or fb.get("images", {}).get("urls", {}).get("large_artwork", "")
                 saavn_track = {
                     "seokey": fb.get("seokey") or seokey,
                     "id": fb.get("id") or seokey,
@@ -553,7 +554,10 @@ async def songs_info(
                     "duration": fb.get("duration") or "180",
                     "stream_url": fb["stream_url"],
                     "stream_urls": fb.get("stream_urls", {}),
-                    "images": fb.get("images", {"urls": {"large_artwork": "", "medium_artwork": "", "small_artwork": ""}}),
+                    "image_url": img,
+                    "imageUrl": img,
+                    "artworkUrl": img,
+                    "images": fb.get("images", {"urls": {"large_artwork": img, "medium_artwork": img, "small_artwork": img}}),
                 }
                 await cache.set(key, [saavn_track], config.TTL_SONG)
                 return [saavn_track]
@@ -571,6 +575,7 @@ async def songs_info(
             effective_artist = (artist or "").strip()
             fb = await fallback_res.resolve_stream(effective_title, effective_artist)
             if fb and fb.get("stream_url"):
+                img = fb.get("image_url") or fb.get("images", {}).get("urls", {}).get("large_artwork", "")
                 synthetic_track = {
                     "seokey": seokey,
                     "id": seokey,
@@ -581,7 +586,10 @@ async def songs_info(
                     "duration": fb.get("duration") or "180",
                     "stream_url": fb["stream_url"],
                     "stream_urls": fb.get("stream_urls", {}),
-                    "images": fb.get("images", {"urls": {"large_artwork": "", "medium_artwork": "", "small_artwork": ""}}),
+                    "image_url": img,
+                    "imageUrl": img,
+                    "artworkUrl": img,
+                    "images": fb.get("images", {"urls": {"large_artwork": img, "medium_artwork": img, "small_artwork": img}}),
                 }
                 await cache.set(key, [synthetic_track], config.TTL_SONG)
                 return [synthetic_track]

@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import TypeAdapter, ValidationError
 
 from api.catalog.models import Language
-from api.catalog.normalize import album, artist, items, playlist, song
+from api.catalog.normalize import album, artist, clean_album_or_title, items, playlist, song
 from api.catalog.search.ranking import confidence, normalize_query, rank, _strong_match, parse_query_language_and_core, _tokens
 from api.core import config
 
@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 def _apply_album_artwork(
     songs: list[dict[str, Any]],
     albums: list[dict[str, Any]],
+    artists: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Attach the matching album cover to songs without guessing by artist."""
+    """Attach the matching album cover or verified artist photo to songs without artwork."""
     artwork_by_key: dict[str, str] = {}
+    albums_with_art: list[tuple[str, str]] = []
     for value in albums:
         artwork = str(
             value.get("artworkUrl") or value.get("image_url")
@@ -32,25 +34,75 @@ def _apply_album_artwork(
         for identity in (value.get("id"), value.get("provider_id")):
             if identity:
                 artwork_by_key[f"id:{identity}"] = artwork
-        title = normalize_query(str(value.get("title") or value.get("name") or ""))
+        raw_t = str(value.get("title") or value.get("name") or "")
+        title = normalize_query(raw_t)
         if title:
             artwork_by_key[f"title:{title}"] = artwork
+            clean_t = normalize_query(clean_album_or_title(raw_t))
+            if clean_t and clean_t != title:
+                artwork_by_key[f"title:{clean_t}"] = artwork
+            albums_with_art.append((title, artwork))
+
+    artist_art_by_name: dict[str, str] = {}
+    for a in (artists or []):
+        a_art = str(a.get("image_url") or a.get("imageUrl") or "").strip()
+        a_name = normalize_query(str(a.get("name") or ""))
+        if a_art and a_name:
+            artist_art_by_name[a_name] = a_art
 
     hydrated: list[dict[str, Any]] = []
     for value in songs:
         result = dict(value)
-        album_value = result.get("album") if isinstance(result.get("album"), dict) else {}
+        existing_art = str(result.get("image_url") or result.get("imageUrl") or result.get("artworkUrl") or "").strip()
+        if not existing_art and isinstance(result.get("images"), dict):
+            urls = result["images"].get("urls") if isinstance(result["images"].get("urls"), dict) else result["images"]
+            if isinstance(urls, dict):
+                existing_art = str(urls.get("large_artwork") or urls.get("medium_artwork") or urls.get("small_artwork") or "").strip()
+
+        album_val = result.get("album")
+        album_dict = album_val if isinstance(album_val, dict) else {}
+        album_title_str = str(
+            album_dict.get("title") or album_dict.get("name") or (album_val if isinstance(album_val, str) else "")
+        ).strip()
+        norm_album_title = normalize_query(album_title_str)
+        clean_album_title = normalize_query(clean_album_or_title(album_title_str))
+
         keys = [
-            f"id:{album_value.get('id')}",
-            f"id:{album_value.get('provider_id')}",
-            f"title:{normalize_query(str(album_value.get('title') or album_value.get('name') or ''))}",
+            f"id:{album_dict.get('id')}",
+            f"id:{album_dict.get('provider_id')}",
+            f"title:{norm_album_title}",
+            f"title:{clean_album_title}",
         ]
         artwork = next((artwork_by_key[key] for key in keys if key in artwork_by_key), None)
-        if artwork:
-            result["image_url"] = artwork
-            result["artworkUrl"] = artwork
-            if album_value:
-                result["album"] = {**album_value, "artworkUrl": artwork}
+        if not artwork and (norm_album_title or clean_album_title):
+            for alb_t, alb_art in albums_with_art:
+                if (norm_album_title and (alb_t in norm_album_title or norm_album_title in alb_t)) or \
+                   (clean_album_title and (alb_t in clean_album_title or clean_album_title in alb_t)):
+                    artwork = alb_art
+                    break
+
+        if not artwork and not existing_art and artist_art_by_name:
+            raw_art = str(result.get("artist") or (result.get("artists", [{}])[0].get("name") if isinstance(result.get("artists"), list) and result.get("artists") else "")).strip()
+            norm_art = normalize_query(raw_art)
+            if norm_art in artist_art_by_name:
+                artwork = artist_art_by_name[norm_art]
+
+        target_art = existing_art or artwork
+        if target_art:
+            result["image_url"] = target_art
+            result["imageUrl"] = target_art
+            result["artworkUrl"] = target_art
+            if not result.get("images"):
+                result["images"] = {
+                    "urls": {
+                        "large_artwork": target_art,
+                        "medium_artwork": target_art,
+                        "small_artwork": target_art,
+                    }
+                }
+            if album_dict:
+                result["album"] = {**album_dict, "artworkUrl": target_art}
+
         hydrated.append(result)
     return hydrated
 
@@ -933,6 +985,7 @@ class CatalogService:
         grouped["songs"] = _apply_album_artwork(
             grouped.get("songs", []),
             grouped.get("albums", []),
+            grouped.get("artists", []),
         )
 
         all_ranked = [(confidence(effective_query, item, key[:-1]), key[:-1], item)

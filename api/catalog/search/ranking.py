@@ -894,7 +894,7 @@ def _merge_song_record(primary: dict[str, Any], duplicate: dict[str, Any]) -> di
             if duplicate.get(field):
                 merged[field] = duplicate[field]
 
-    for field in ("image_url", "imageUrl", "artworkUrl", "album", "language", "duration", "duration_seconds", "duration_ms", "isrc"):
+    for field in ("image_url", "imageUrl", "artworkUrl", "images", "album", "language", "duration", "duration_seconds", "duration_ms", "isrc"):
         if not merged.get(field) and duplicate.get(field):
             merged[field] = duplicate[field]
     merged["playable"] = (merged.get("playable") is not False or duplicate.get("playable") is not False)
