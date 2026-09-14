@@ -24,20 +24,7 @@ async def google_auth(request: Request, user: AuthenticatedUser = Depends(get_fi
     repository = getattr(request.app.state, "user_repository", None)
     if repository is None:
         raise HTTPException(503, "Database is unavailable")
-    existing = await repository.get_account(user.uid)
-    if existing and existing["account_status"] != "deleted":
-        if existing["account_status"] != "active":
-            raise invalid_account("ACCOUNT_DISABLED")
-        # Refresh email, display name, avatar, provider, and last_seen_at on
-        # every successful exchange so Supabase stays aligned with Firebase.
-        await repository.ensure_user(user)
-    elif existing:
-        raise invalid_account("ACCOUNT_DELETED")
-    else:
-        if await repository.is_account_deleted(user.uid):
-            raise invalid_account("ACCOUNT_DELETED")
-        await repository.ensure_user(user)
-    return await repository.bootstrap(user)
+    return await repository.fast_google_auth(user)
 
 
 @router.get("/me/bootstrap")

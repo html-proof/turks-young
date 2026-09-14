@@ -233,8 +233,143 @@ class PostgresUserRepository:
             )
             return status == "deleted"
 
-    async def can_register(self, firebase_uid: str, created: float = 0.0) -> bool:
-        return not await self.is_account_deleted(firebase_uid)
+    async def fast_google_auth(self, user: AuthenticatedUser) -> dict[str, Any]:
+        """Fast-path atomic Google authentication exchange and bootstrap in 1-2 database queries."""
+        from api.auth import invalid_account
+
+        async with self._pool.acquire() as conn:
+            account = await conn.fetchrow(
+                """
+                UPDATE users
+                SET email        = COALESCE($2, email),
+                    display_name = COALESCE($3, display_name),
+                    photo_url    = COALESCE($4, photo_url),
+                    provider     = COALESCE($5, provider),
+                    last_seen_at = now(),
+                    updated_at   = now()
+                WHERE firebase_uid = $1
+                RETURNING uid, firebase_uid, email, display_name, photo_url,
+                          onboarding_completed, onboarding_completed_at, account_status
+                """,
+                user.uid, user.email, user.display_name, user.photo_url, user.provider,
+            )
+
+            if account:
+                if account["account_status"] == "deleted":
+                    raise invalid_account("ACCOUNT_DELETED")
+                if account["account_status"] != "active":
+                    raise invalid_account("ACCOUNT_DISABLED")
+                db_uid = account["uid"]
+            else:
+                job = await conn.fetchval(
+                    "SELECT 1 FROM account_deletion_jobs WHERE firebase_uid=$1",
+                    user.uid,
+                )
+                if job:
+                    raise invalid_account("ACCOUNT_DELETED")
+                db_uid = await self.ensure_user(user)
+                account = await conn.fetchrow(
+                    """
+                    SELECT uid, firebase_uid, email, display_name, photo_url,
+                           onboarding_completed, onboarding_completed_at, account_status
+                    FROM users WHERE uid=$1
+                    """,
+                    db_uid,
+                )
+
+            self._uid_cache[user.uid] = db_uid
+            self._uid_cache[db_uid] = db_uid
+
+            p_row = await conn.fetchrow(
+                """
+                SELECT display_name, languages, language_ids, favorite_genres,
+                       favorite_artists, favorite_artist_ids, onboarding_completed,
+                       streaming_quality_wifi, streaming_quality_mobile, download_quality,
+                       data_saver_enabled, autoplay_enabled, push_notifications_enabled,
+                       explicit_content_enabled, pulse_followed_releases_enabled,
+                       pulse_selected_releases_enabled, pulse_trending_enabled,
+                       pulse_recommendations_enabled, equalizer_preset, created_at, updated_at,
+                       onboarding_step
+                FROM user_profiles
+                WHERE uid = $1
+                """,
+                db_uid,
+            )
+
+        lang_ids = list((p_row["language_ids"] if p_row else None) or [])
+        artist_ids = list((p_row["favorite_artist_ids"] if p_row else None) or [])
+        languages = list((p_row["languages"] if p_row else None) or [])
+        favorite_artists = list((p_row["favorite_artists"] if p_row else None) or [])
+        favorite_genres = list((p_row["favorite_genres"] if p_row else None) or [])
+        onboarding_step = (p_row["onboarding_step"] if p_row else None) or ("artist" if lang_ids else "language")
+
+        has_completed = bool(account["onboarding_completed"]) or (bool(lang_ids) and bool(artist_ids))
+        if has_completed and not account["onboarding_completed"]:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET onboarding_completed=TRUE, onboarding_completed_at=COALESCE(onboarding_completed_at, now()) WHERE uid=$1; "
+                    "UPDATE user_profiles SET onboarding_completed=TRUE, onboarding_step='complete' WHERE uid=$1;",
+                    db_uid,
+                )
+            onboarding_completed = True
+            onboarding_step = "complete"
+        else:
+            onboarding_completed = bool(account["onboarding_completed"])
+
+        profile_data = {
+            "display_name": (p_row["display_name"] if p_row and p_row["display_name"] else None) or account["display_name"] or "",
+            "languages": languages,
+            "language_ids": lang_ids,
+            "favorite_genres": favorite_genres,
+            "favorite_artists": favorite_artists,
+            "favorite_artist_ids": artist_ids,
+            "onboarding_completed": onboarding_completed,
+            "streaming_quality_wifi": p_row["streaming_quality_wifi"] if p_row else "high",
+            "streaming_quality_mobile": p_row["streaming_quality_mobile"] if p_row else "auto",
+            "download_quality": p_row["download_quality"] if p_row else "high",
+            "data_saver_enabled": p_row["data_saver_enabled"] if p_row else False,
+            "autoplay_enabled": p_row["autoplay_enabled"] if p_row else True,
+            "push_notifications_enabled": p_row["push_notifications_enabled"] if p_row else True,
+            "pulse_followed_releases_enabled": p_row["pulse_followed_releases_enabled"] if p_row else True,
+            "pulse_selected_releases_enabled": p_row["pulse_selected_releases_enabled"] if p_row else True,
+            "pulse_trending_enabled": p_row["pulse_trending_enabled"] if p_row else True,
+            "pulse_recommendations_enabled": p_row["pulse_recommendations_enabled"] if p_row else True,
+            "explicit_content_enabled": p_row["explicit_content_enabled"] if p_row else True,
+            "equalizer_preset": p_row["equalizer_preset"] if p_row else "flat",
+            "created_at": p_row["created_at"].isoformat() if p_row and p_row["created_at"] else None,
+            "updated_at": p_row["updated_at"].isoformat() if p_row and p_row["updated_at"] else None,
+        }
+
+        onboarding_data = {
+            "completed": onboarding_completed,
+            "step": "complete" if onboarding_completed else onboarding_step,
+            "next_step": "none" if onboarding_completed else (onboarding_step + "s" if onboarding_step in {"language", "artist"} else "languages"),
+            "languages": languages,
+            "language_ids": lang_ids,
+            "favorite_artists": favorite_artists,
+            "favorite_artist_ids": artist_ids,
+        }
+
+        return {
+            "authenticated": True,
+            "account": {
+                "id": account["uid"],
+                "uid": account["uid"],
+                "firebase_uid": account["firebase_uid"],
+                "email": account["email"],
+                "display_name": account["display_name"],
+                "avatar_url": account["photo_url"],
+                "onboarding_completed": onboarding_completed,
+                "onboarding_completed_at": account["onboarding_completed_at"].isoformat() if account["onboarding_completed_at"] else None,
+                "account_status": account["account_status"],
+            },
+            "profile": profile_data,
+            "preferences": {
+                "languages": [{"id": i, "name": n} for i, n in zip(lang_ids, languages)],
+                "artists": [{"id": i, "name": n} for i, n in zip(artist_ids, favorite_artists)],
+            },
+            "onboarding": onboarding_data,
+        }
 
     async def bootstrap(self, user: AuthenticatedUser) -> dict[str, Any]:
         account = await self.get_account(user.uid)
