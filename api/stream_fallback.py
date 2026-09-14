@@ -413,6 +413,238 @@ class StreamFallbackResolver:
             logger.warning("Stream fallback search failed for query='%s': %s", clean_q, exc)
             return []
 
+    async def search_albums(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Search secondary open provider (JioSaavn) for albums when primary provider is slow or missing entries."""
+        clean_q = (query or "").strip()
+        if not clean_q:
+            return []
+
+        cache_key = f"stream_fallback:search_albums:{clean_q.lower()}:{limit}"
+        if self._cache:
+            try:
+                cached = await self._cache.get(cache_key)
+                if cached:
+                    if isinstance(cached, str):
+                        cached = json.loads(cached)
+                    return cached
+            except Exception:
+                pass
+
+        encoded = quote(clean_q, safe="")
+        search_url = f"https://www.jiosaavn.com/api.php?__call=search.getAlbumResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&q={encoded}&n={limit}&p=1"
+
+        try:
+            session = await self._get_session()
+            async with session.get(search_url) as resp:
+                if resp.status != 200:
+                    return []
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    text = await resp.text()
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        return []
+
+            results = data.get("results") or (data.get("data", {}).get("results") if isinstance(data.get("data"), dict) else [])
+            if not isinstance(results, list) or not results:
+                return []
+
+            albums = []
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                album_title = item.get("title") or item.get("name") or ""
+                if not album_title or album_title.lower() == "undefined":
+                    continue
+
+                more_info = item.get("more_info") if isinstance(item.get("more_info"), dict) else {}
+                primary_artists = ""
+                artist_map = more_info.get("artistMap") if isinstance(more_info.get("artistMap"), dict) else {}
+                pa_list = artist_map.get("primary_artists") or artist_map.get("artists") or []
+                if isinstance(pa_list, list) and pa_list:
+                    primary_artists = ", ".join(str(a.get("name")) for a in pa_list if isinstance(a, dict) and a.get("name"))
+                if not primary_artists:
+                    primary_artists = str(more_info.get("music") or item.get("subtitle") or "")
+
+                img_url = item.get("image") or ""
+                if img_url.startswith("http://"):
+                    img_url = "https://" + img_url[7:]
+                large_artwork = re.sub(r"[-_](?:50x50|80x80|150x150|250x250|320x320)", "-500x500", img_url) if img_url else ""
+
+                album_id = str(item.get("id") or "")
+                seokey = f"saavn-album-{album_id}" if album_id else ""
+                perma_url = str(item.get("perma_url") or "")
+                if perma_url:
+                    parts = perma_url.rstrip("/").split("/")
+                    if parts:
+                        seokey = f"saavn-{parts[-1]}"
+
+                album_dict = {
+                    "id": f"saavn:{album_id}" if album_id else seokey,
+                    "album_id": album_id,
+                    "seokey": seokey or f"saavn:{album_id}",
+                    "title": album_title,
+                    "name": album_title,
+                    "artist": primary_artists,
+                    "artists": [{"name": a.strip()} for a in primary_artists.split(",") if a.strip()],
+                    "language": str(item.get("language") or ""),
+                    "release_date": str(item.get("year") or ""),
+                    "track_count": int(more_info.get("song_count") or 0),
+                    "image_url": large_artwork or img_url,
+                    "imageUrl": large_artwork or img_url,
+                    "artworkUrl": large_artwork or img_url,
+                    "images": {
+                        "urls": {
+                            "large_artwork": large_artwork or img_url,
+                            "medium_artwork": img_url,
+                            "small_artwork": img_url,
+                        }
+                    },
+                    "source": "jiosaavn",
+                }
+                albums.append(album_dict)
+
+            if self._cache and albums:
+                try:
+                    await self._cache.set(cache_key, albums, 86400)
+                except Exception:
+                    pass
+
+            return albums
+        except Exception as exc:
+            logger.warning("Stream fallback search_albums failed for query='%s': %s", clean_q, exc)
+            return []
+
+    async def get_album_details(self, album_id: str) -> dict[str, Any]:
+        """Fetch album details and track list from JioSaavn."""
+        clean_id = re.sub(r"^saavn[:-]?(?:album[:-]?)?", "", (album_id or "").strip())
+        if not clean_id:
+            return {}
+
+        cache_key = f"stream_fallback:album_details:{clean_id}"
+        if self._cache:
+            try:
+                cached = await self._cache.get(cache_key)
+                if cached:
+                    if isinstance(cached, str):
+                        cached = json.loads(cached)
+                    return cached
+            except Exception:
+                pass
+
+        details_url = f"https://www.jiosaavn.com/api.php?__call=content.getAlbumDetails&albumid={quote(clean_id)}&_format=json"
+        try:
+            session = await self._get_session()
+            async with session.get(details_url) as resp:
+                if resp.status != 200:
+                    return {}
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    text = await resp.text()
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        return {}
+
+            if not isinstance(data, dict):
+                return {}
+
+            album_title = data.get("title") or data.get("name") or ""
+            if not album_title:
+                return {}
+
+            img_url = data.get("image") or ""
+            if img_url.startswith("http://"):
+                img_url = "https://" + img_url[7:]
+            large_artwork = re.sub(r"[-_](?:50x50|80x80|150x150|250x250|320x320)", "-500x500", img_url) if img_url else ""
+
+            raw_songs = data.get("songs") or data.get("list") or []
+            songs = []
+            for item in raw_songs:
+                if not isinstance(item, dict):
+                    continue
+                song_title = item.get("song") or item.get("title") or ""
+                if not song_title:
+                    continue
+
+                primary_artists = item.get("primary_artists") or item.get("singers") or ""
+                encrypted_url = item.get("encrypted_media_url") or ""
+                decrypted = decrypt_saavn_media_url(encrypted_url) if encrypted_url else ""
+                preview_url = item.get("media_preview_url") or ""
+                if preview_url.startswith("http://"):
+                    preview_url = "https://" + preview_url[7:]
+
+                stream_dict = self.build_fallback_stream_urls(decrypted=decrypted, preview_url=preview_url)
+                primary_stream = stream_dict.get("default") or stream_dict.get("high_quality") or ""
+
+                track_img = item.get("image") or img_url
+                if track_img.startswith("http://"):
+                    track_img = "https://" + track_img[7:]
+                track_large = re.sub(r"[-_](?:50x50|80x80|150x150|250x250|320x320)", "-500x500", track_img) if track_img else large_artwork
+
+                songs.append({
+                    "id": f"saavn:{item.get('id')}",
+                    "track_id": f"saavn:{item.get('id')}",
+                    "seokey": f"saavn-{item.get('id')}",
+                    "title": song_title,
+                    "artist": primary_artists,
+                    "album": album_title,
+                    "album_id": clean_id,
+                    "duration": str(item.get("duration") or "180"),
+                    "image_url": track_large or track_img,
+                    "artworkUrl": track_large or track_img,
+                    "images": {
+                        "urls": {
+                            "large_artwork": track_large or track_img,
+                            "medium_artwork": track_img,
+                            "small_artwork": track_img,
+                        }
+                    },
+                    "stream_url": primary_stream,
+                    "stream_urls": {
+                        "urls": stream_dict
+                    },
+                    "source": "jiosaavn",
+                })
+
+            result = {
+                "id": f"saavn:{clean_id}",
+                "album_id": clean_id,
+                "seokey": f"saavn-album-{clean_id}",
+                "title": album_title,
+                "name": album_title,
+                "artist": data.get("primary_artists") or (data.get("more_info", {}).get("music") if isinstance(data.get("more_info"), dict) else "") or "",
+                "language": str(data.get("language") or ""),
+                "release_date": str(data.get("year") or ""),
+                "track_count": len(songs),
+                "image_url": large_artwork or img_url,
+                "artworkUrl": large_artwork or img_url,
+                "images": {
+                    "urls": {
+                        "large_artwork": large_artwork or img_url,
+                        "medium_artwork": img_url,
+                        "small_artwork": img_url,
+                    }
+                },
+                "songs": songs,
+                "tracks": songs,
+                "source": "jiosaavn",
+            }
+
+            if self._cache and songs:
+                try:
+                    await self._cache.set(cache_key, result, 86400)
+                except Exception:
+                    pass
+
+            return result
+        except Exception as exc:
+            logger.warning("Stream fallback get_album_details failed for album_id='%s': %s", album_id, exc)
+            return {}
+
 
 _singleton_resolver: Optional[StreamFallbackResolver] = None
 

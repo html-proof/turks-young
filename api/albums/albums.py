@@ -27,17 +27,39 @@ class Albums:
                         entries = exp_entries
                         break
 
-        if len(entries) == 0:
-            return await errors.no_results()
-
         album_ids = []
         for i in range(min(limit, len(entries))):
             seo = entries[i].get('seo') or entries[i].get('seokey')
-            if seo:
-                album_ids.append(seo)
-        if len(album_ids) == 0:
+            if seo and str(seo).lower() != 'undefined':
+                title = str(entries[i].get('ti') or entries[i].get('title') or '').lower()
+                if title != 'undefined':
+                    album_ids.append(str(seo))
+
+        album_info = []
+        if album_ids:
+            fetch_ids = album_ids[:min(limit, 10)]
+            try:
+                album_info = await asyncio.wait_for(self.get_album_info(fetch_ids, False), timeout=1.8)
+            except Exception:
+                album_info = []
+
+        if not album_info or (isinstance(album_info, dict) and "error" in album_info):
+            fallback_res = getattr(self, "_fallback_resolver", None)
+            if not fallback_res:
+                try:
+                    from api.stream_fallback import get_stream_fallback_resolver
+                    fallback_res = get_stream_fallback_resolver()
+                except Exception:
+                    fallback_res = None
+            if fallback_res:
+                try:
+                    fb_albums = await fallback_res.search_albums(clean_q, limit)
+                    if fb_albums:
+                        return fb_albums
+                except Exception:
+                    pass
             return await errors.no_results()
-        album_info = await self.get_album_info(album_ids, False)
+
         return album_info
 
     async def get_album_info(self, album_id: list, info: bool, fetch_missing_tracks: bool = True) -> list:

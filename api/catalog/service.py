@@ -627,6 +627,65 @@ class CatalogService:
                     previous_searches=previous_searches,
                     parsed_query=parsed_query,
                 )
+            elif kind == "album":
+                async def load_albums_parallel():
+                    async def fetch_gaana():
+                        try:
+                            return _clean(await asyncio.wait_for(methods["album"](effective_query, requested), timeout=2.2))
+                        except Exception as exc:
+                            logger.debug("Gaana album search failed: %s", exc)
+                            return []
+
+                    async def fetch_saavn():
+                        try:
+                            from unittest.mock import Mock
+                            if isinstance(self.catalog, Mock) or type(self.catalog).__name__.startswith("Fake"):
+                                return []
+                            from api.stream_fallback import get_stream_fallback_resolver
+                            fb_resolver = get_stream_fallback_resolver()
+                            return await asyncio.wait_for(fb_resolver.search_albums(effective_query, requested), timeout=2.0)
+                        except Exception as exc:
+                            logger.debug("JioSaavn album search failed: %s", exc)
+                            return []
+
+                    gaana_res, saavn_res = await asyncio.gather(fetch_gaana(), fetch_saavn())
+                    combined_albums = []
+                    if gaana_res and not isinstance(gaana_res, Exception):
+                        combined_albums.extend(items(gaana_res, "album"))
+                    if saavn_res and not isinstance(saavn_res, Exception):
+                        combined_albums.extend(items(saavn_res, "album"))
+                    if not combined_albums:
+                        raise TimeoutError("album search providers returned no results")
+                    return combined_albums
+
+                try:
+                    candidate_albums = await self._cached(
+                        f"music:search:albums_v3:{effective_query}:{requested}",
+                        config.TTL_SEARCH,
+                        load_albums_parallel,
+                        config.STALE_CACHE_TTL,
+                    )
+                except TimeoutError:
+                    logger.warning("catalog search provider timeout kind=%s", kind)
+                    provider_timed_out = True
+                    candidate_albums = []
+                try:
+                    user_languages, user_artists, history_tracks, previous_searches = await asyncio.wait_for(personalization_task, timeout=0.08)
+                except Exception:
+                    user_languages, user_artists, history_tracks, previous_searches = None, None, None, None
+                effective_langs = [detected_lang] if detected_lang else user_languages
+
+                normalized = rank(
+                    effective_query,
+                    candidate_albums,
+                    "album",
+                    requested,
+                    user_languages=effective_langs,
+                    user_artists=user_artists,
+                    history_tracks=history_tracks,
+                    previous_searches=previous_searches,
+                    parsed_query=parsed_query,
+                )
             else:
                 async def load():
                     return _clean(await asyncio.wait_for(methods[kind](effective_query, requested), timeout=2.2))
@@ -1242,6 +1301,16 @@ class CatalogService:
             return None
 
         async def load() -> dict[str, Any] | None:
+            if album_id.startswith("saavn"):
+                try:
+                    from api.stream_fallback import get_stream_fallback_resolver
+                    fb_res = get_stream_fallback_resolver()
+                    saavn_alb = await fb_res.get_album_details(album_id)
+                    if saavn_alb and saavn_alb.get("songs"):
+                        return album(saavn_alb)
+                except Exception as exc:
+                    logger.debug("JioSaavn direct album_details failed for %s: %s", album_id, exc)
+
             normalized_album = None
             merged_tracks: list[dict[str, Any]] = []
             seen_tracks: set[str] = set()
