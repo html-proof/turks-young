@@ -219,21 +219,47 @@ class PostgresUserRepository:
                 self._uid_cache[target_uid] = target_uid
                 return target_uid
 
-    async def can_register(self, firebase_uid: str, created: float) -> bool:
+    async def is_account_deleted(self, firebase_uid: str) -> bool:
         async with self._pool.acquire() as conn:
-            return bool(await conn.fetchval(
-                "SELECT to_timestamp($2) >= installed_at AND NOT EXISTS "
-                "(SELECT 1 FROM account_identity_ledger WHERE identity_hash=$1) "
-                "FROM account_lifecycle_epoch",
-                hashlib.sha256(firebase_uid.encode()).hexdigest(), created))
+            job = await conn.fetchval(
+                "SELECT 1 FROM account_deletion_jobs WHERE firebase_uid=$1",
+                firebase_uid,
+            )
+            if job:
+                return True
+            status = await conn.fetchval(
+                "SELECT account_status FROM users WHERE firebase_uid=$1",
+                firebase_uid,
+            )
+            return status == "deleted"
+
+    async def can_register(self, firebase_uid: str, created: float = 0.0) -> bool:
+        return not await self.is_account_deleted(firebase_uid)
 
     async def bootstrap(self, user: AuthenticatedUser) -> dict[str, Any]:
         account = await self.get_account(user.uid)
         if account is None:
             raise ValueError("ACCOUNT_NOT_FOUND")
         db_uid = account["uid"]
-        onboarding = await self.get_onboarding(db_uid)
         profile = await self.get_profile(db_uid)
+        onboarding = await self.get_onboarding(db_uid)
+        has_completed = bool(account["onboarding_completed"]) or (
+            bool(profile.get("language_ids")) and bool(profile.get("favorite_artist_ids"))
+        )
+        if has_completed and not account["onboarding_completed"]:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET onboarding_completed=TRUE, onboarding_completed_at=COALESCE(onboarding_completed_at, now()) WHERE uid=$1",
+                    db_uid,
+                )
+                await conn.execute(
+                    "UPDATE user_profiles SET onboarding_completed=TRUE, onboarding_step='complete' WHERE uid=$1",
+                    db_uid,
+                )
+            account["onboarding_completed"] = True
+            onboarding["completed"] = True
+            onboarding["step"] = "complete"
+
         return {
             "authenticated": True,
             "account": {
@@ -1133,13 +1159,17 @@ class PostgresUserRepository:
             )
         if row is None:
             return {"completed": False, "step": "language", "languages": [], "language_ids": [], "favorite_artists": [], "favorite_artist_ids": []}
+        lang_ids = list(row["language_ids"] or [])
+        artist_ids = list(row["favorite_artist_ids"] or [])
+        has_completed = bool(row["onboarding_completed"]) or (bool(lang_ids) and bool(artist_ids))
+        step = "complete" if has_completed else (row["onboarding_step"] or ("artist" if lang_ids else "language"))
         return {
-            "completed": row["onboarding_completed"],
-            "step": row["onboarding_step"],
+            "completed": has_completed,
+            "step": step,
             "languages": list(row["languages"] or []),
-            "language_ids": list(row["language_ids"] or []),
+            "language_ids": lang_ids,
             "favorite_artists": list(row["favorite_artists"] or []),
-            "favorite_artist_ids": list(row["favorite_artist_ids"] or []),
+            "favorite_artist_ids": artist_ids,
         }
 
     async def update_onboarding(self, uid: str, data: OnboardingUpdate) -> dict[str, Any]:

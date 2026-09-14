@@ -34,9 +34,8 @@ async def google_auth(request: Request, user: AuthenticatedUser = Depends(get_fi
     elif existing:
         raise invalid_account("ACCOUNT_DELETED")
     else:
-        created = await request.app.state.firebase.creation_time(user.uid)
-        if not await repository.can_register(user.uid, created):
-            raise invalid_account("USER_NOT_FOUND")
+        if await repository.is_account_deleted(user.uid):
+            raise invalid_account("ACCOUNT_DELETED")
         await repository.ensure_user(user)
     return await repository.bootstrap(user)
 

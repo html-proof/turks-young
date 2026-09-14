@@ -145,14 +145,17 @@ async def api_me(
     # Firebase claims may omit a previously supplied provider picture on a
     # later token refresh. Keep the verified account record as a fallback.
     account = account or {}
+    has_completed = bool(onboarding["completed"]) or bool(account.get("onboarding_completed")) or (
+        bool(profile.get("language_ids")) and bool(profile.get("favorite_artist_ids"))
+    )
     return envelope({
         "id": user.uid,
         "email": user.email,
         "display_name": user.display_name or account.get("display_name"),
         "photo_url": user.photo_url or account.get("photo_url"),
-        "onboarding_completed": onboarding["completed"],
-        "onboarding_step": onboarding["step"],
-        "profile": profile,
+        "onboarding_completed": has_completed,
+        "onboarding_step": "complete" if has_completed else onboarding.get("step", "language"),
+        "profile": profile | {"onboarding_completed": has_completed},
     })
 
 
