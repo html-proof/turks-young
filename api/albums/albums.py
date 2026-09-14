@@ -118,20 +118,44 @@ class Albums:
                             t['albumseokey'] = album_meta['seokey']
                         if not t.get('artwork') and album_meta.get('artwork'):
                             t['artwork'] = album_meta['artwork']
-                    if t.get('seokey'):
+
+                    # Use track_id as a seokey fallback so tracks are not
+                    # silently dropped when Gaana omits the seokey field.
+                    effective_seokey = t.get('seokey') or ''
+                    if not effective_seokey:
+                        fallback_id = str(t.get('track_id') or t.get('id') or '').strip()
+                        if fallback_id:
+                            t = dict(t)  # don't mutate the original
+                            t['seokey'] = fallback_id
+                            effective_seokey = fallback_id
+
+                    if effective_seokey:
                         formatted = await self.format_json_songs(t)
                         if isinstance(formatted, dict) and 'error' not in formatted:
                             formatted_tracks.append(formatted)
+                        else:
+                            title = t.get('track_title') or t.get('title') or t.get('name') or ''
+                            if title:
+                                formatted_tracks.append({
+                                    'track_id': str(t.get('track_id') or t.get('id') or ''),
+                                    'seokey': effective_seokey,
+                                    'title': title,
+                                    'album': album_meta.get('title') if album_meta else '',
+                                    'album_seokey': album_meta.get('seokey') if album_meta else '',
+                                    'duration': str(t.get('duration') or ''),
+                                    'artist': t.get('artist') or t.get('artists') or '',
+                                    'artwork': album_meta.get('artwork') if album_meta else '',
+                                })
                     elif not fetch_missing:
                         title = t.get('track_title') or t.get('title') or t.get('name') or ''
                         if title:
                             formatted_tracks.append({
                                 'track_id': str(t.get('track_id') or t.get('id') or ''),
-                                'seokey': t.get('seokey') or str(t.get('track_id') or ''),
+                                'seokey': str(t.get('track_id') or t.get('id') or ''),
                                 'title': title,
                                 'album': album_meta.get('title') if album_meta else '',
                                 'album_seokey': album_meta.get('seokey') if album_meta else '',
-                                'duration': t.get('duration', ''),
+                                'duration': str(t.get('duration') or ''),
                                 'artist': t.get('artist') or t.get('artists') or '',
                                 'artwork': album_meta.get('artwork') if album_meta else '',
                             })

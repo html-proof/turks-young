@@ -1237,13 +1237,19 @@ class CatalogService:
 
             # Fast album gathering: extract unique albums directly from top_tracks (0ms!)
             for t in raw.get("top_tracks", []):
-                alb_id = str(t.get("album_id") or t.get("album_seokey") or "")
+                alb_seokey = str(t.get("album_seokey") or t.get("albumseokey") or "").strip()
+                alb_id = alb_seokey or str(t.get("album_id") or "").strip()
                 alb_title = t.get("album") or ""
+                if (not alb_id or alb_id.isdigit()) and alb_title:
+                    cand_slug = re.sub(r'[^a-zA-Z0-9]+', '-', alb_title.lower()).strip('-')
+                    if cand_slug:
+                        alb_id = cand_slug
                 title_key = alb_title.lower().strip()
                 if alb_id and alb_title and title_key not in seen_album_titles:
                     seen_album_titles.add(title_key)
                     album_list.append({
                         "id": alb_id,
+                        "seokey": alb_id,
                         "name": alb_title,
                         "title": alb_title,
                         "artist": artist_name,
@@ -1301,12 +1307,12 @@ class CatalogService:
             return None
 
         async def load() -> dict[str, Any] | None:
-            if album_id.startswith("saavn"):
+            if album_id.startswith("saavn") or album_id.isdigit():
                 try:
                     from api.stream_fallback import get_stream_fallback_resolver
                     fb_res = get_stream_fallback_resolver()
                     saavn_alb = await fb_res.get_album_details(album_id)
-                    if saavn_alb and saavn_alb.get("songs"):
+                    if saavn_alb and (saavn_alb.get("songs") or saavn_alb.get("tracks")):
                         return album(saavn_alb)
                 except Exception as exc:
                     logger.debug("JioSaavn direct album_details failed for %s: %s", album_id, exc)
@@ -1329,15 +1335,21 @@ class CatalogService:
                     for track in candidate.get("tracks") or candidate.get("songs") or []:
                         key = str(track.get("track_id") or track.get("provider_id") or track.get("id") or track.get("seokey") or "").strip().lower()
                         if not key:
-                            key = f"{str(track.get('title') or '').strip().lower()}|{str(track.get('artist') or '').strip().lower()}"
+                            raw_art = track.get("artist")
+                            art_str = (raw_art.get("name") if isinstance(raw_art, dict) else str(raw_art or "")).strip().lower()
+                            key = f"{str(track.get('title') or '').strip().lower()}|{art_str}"
                         if key and key not in seen_tracks:
                             seen_tracks.add(key)
                             merged_tracks.append(track)
+                    logger.debug(
+                        "album_details attempt=%d album_id=%s expected=%d merged=%d",
+                        attempt + 1, album_id, expected_count, len(merged_tracks),
+                    )
                     if expected_count <= 0 or len(merged_tracks) >= expected_count:
                         break
                     await asyncio.sleep(0.15 * (attempt + 1))
-                except Exception:
-                    logger.warning("album_details provider_failure album_id=%s attempt=%d", album_id, attempt + 1)
+                except Exception as exc:
+                    logger.warning("album_details provider_failure album_id=%s attempt=%d error=%s", album_id, attempt + 1, exc)
 
             if normalized_album and merged_tracks:
                 normalized_album["tracks"] = merged_tracks
@@ -1389,7 +1401,7 @@ class CatalogService:
                     fb_res = get_stream_fallback_resolver()
                     for cand_q in fb_candidates[:3]:
                         try:
-                            fb_albums = await asyncio.wait_for(fb_res.search_albums(cand_q, 6), timeout=3.5)
+                            fb_albums = await asyncio.wait_for(fb_res.search_albums(cand_q, 8), timeout=4.0)
                             if fb_albums:
                                 cand_core = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', cand_q).strip().lower()
                                 for fb_alb in fb_albums:
@@ -1399,36 +1411,48 @@ class CatalogService:
                                     fb_alb_core = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', fb_alb_title).strip().lower()
                                     matched = (
                                         cand_core == fb_alb_core
-                                        or (cand_core and cand_core in fb_alb_core)
-                                        or (fb_alb_core and fb_alb_core in cand_core)
+                                        or (cand_core and len(cand_core) >= 3 and cand_core in fb_alb_core)
+                                        or (fb_alb_core and len(fb_alb_core) >= 3 and fb_alb_core in cand_core)
                                         or (cand_q.lower() in fb_alb_title.lower())
                                         or (fb_alb_title.lower() in cand_q.lower())
                                     )
                                     if matched:
                                         fb_alb_id = str(fb_alb.get("id") or fb_alb.get("album_id") or "")
                                         if fb_alb_id:
-                                            fb_details = await asyncio.wait_for(fb_res.get_album_details(fb_alb_id), timeout=3.5)
-                                            fb_songs = (fb_details.get("songs") or fb_details.get("tracks") or []) if fb_details else []
-                                            if fb_songs:
+                                            fb_details = await asyncio.wait_for(fb_res.get_album_details(fb_alb_id), timeout=4.0)
+                                            raw_fb_songs = (fb_details.get("songs") or fb_details.get("tracks") or []) if fb_details else []
+                                            if raw_fb_songs:
+                                                norm_fb_songs = [song(s) for s in raw_fb_songs if isinstance(s, dict)]
                                                 result_album = album_meta.copy() if album_meta else {}
                                                 result_album.update({
                                                     "id": result_album.get("id") or album_id,
                                                     "seokey": result_album.get("seokey") or album_id,
-                                                    "tracks": fb_songs,
-                                                    "songs": fb_songs,
-                                                    "song_count": len(fb_songs),
-                                                    "trackCount": len(fb_songs),
-                                                    "expected_track_count": len(fb_songs),
-                                                    "loaded_track_count": len(fb_songs),
+                                                    "name": result_album.get("name") or fb_details.get("title") or fb_details.get("name") or raw_fb_title,
+                                                    "title": result_album.get("title") or fb_details.get("title") or fb_details.get("name") or raw_fb_title,
+                                                    "tracks": norm_fb_songs,
+                                                    "songs": norm_fb_songs,
+                                                    "song_count": len(norm_fb_songs),
+                                                    "trackCount": len(norm_fb_songs),
+                                                    "expected_track_count": len(norm_fb_songs),
+                                                    "loaded_track_count": len(norm_fb_songs),
                                                     "is_complete": True,
                                                     "has_more": False,
                                                 })
+                                                if not result_album.get("artists"):
+                                                    fb_art = fb_details.get("artist")
+                                                    if fb_art:
+                                                        result_album["artistNames"] = [fb_art] if isinstance(fb_art, str) else []
+                                                        result_album["artists"] = [{"id": "", "name": fb_art}] if isinstance(fb_art, str) else []
                                                 if not result_album.get("image_url"):
                                                     fb_img = fb_details.get("image_url") or fb_details.get("artworkUrl") or ""
                                                     if fb_img:
                                                         result_album["image_url"] = fb_img
                                                         result_album["imageUrl"] = fb_img
                                                         result_album["artworkUrl"] = fb_img
+                                                logger.info(
+                                                    "album_details JioSaavn fallback success album_id=%s saavn_title=%s tracks=%d",
+                                                    album_id, fb_alb_title, len(norm_fb_songs),
+                                                )
                                                 return result_album
                         except Exception as exc:
                             logger.debug("album_details JioSaavn search attempt failed cand=%s: %s", cand_q, exc)
@@ -1484,7 +1508,8 @@ class CatalogService:
                                     or (first_raw_id and isinstance(s.get("album"), dict) and s["album"].get("id") == first_raw_id)
                                 )
                             ]
-                            resolved_songs = matched_songs if matched_songs else song_items[:12]
+                            raw_resolved = matched_songs if matched_songs else song_items[:12]
+                            resolved_songs = [song(s) for s in raw_resolved if isinstance(s, dict)]
                             return {
                                 "id": str(album_meta.get("id") or first_raw_id or album_id),
                                 "seokey": str(album_meta.get("seokey") or first_raw_id or album_id),
@@ -1509,7 +1534,12 @@ class CatalogService:
                 except Exception as exc:
                     logger.warning("album_details song search fallback failed query=%s error=%s", query, exc)
 
+            if normalized_album and (normalized_album.get("tracks") or normalized_album.get("songs")):
+                return normalized_album
+
             if normalized_album:
+                normalized_album["is_complete"] = False
+                normalized_album["has_more"] = True
                 return normalized_album
 
             return None

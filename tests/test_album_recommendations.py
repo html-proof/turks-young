@@ -148,3 +148,100 @@ async def test_album_details_success(service, mock_catalog):
     assert len(res["tracks"]) == 1
     assert res["tracks"][0]["title"] == "Song 1"
 
+
+@pytest.mark.asyncio
+async def test_album_details_with_dict_artist_dedup(service, mock_catalog):
+    # Tests that track deduplication works seamlessly when track['artist'] is a normalized dict
+    mock_catalog.get_album_info = AsyncMock(return_value=[{
+        "seokey": "test-dict-artist-album",
+        "title": "Test Dict Artist Album",
+        "trackcount": 2,
+        "tracks": [
+            {
+                "track_id": "trk-1",
+                "title": "Song One",
+                "artist": [{"id": "art-1", "name": "Artist A"}],
+            },
+            {
+                "track_id": "trk-1",  # duplicate
+                "title": "Song One",
+                "artist": [{"id": "art-1", "name": "Artist A"}],
+            },
+            {
+                "track_id": "trk-2",
+                "title": "Song Two",
+                "artist": [{"id": "art-2", "name": "Artist B"}],
+            },
+        ]
+    }])
+    res = await service.album_details("test-dict-artist-album")
+    assert res is not None
+    assert len(res["tracks"]) == 2
+    titles = [t["title"] for t in res["tracks"]]
+    assert titles == ["Song One", "Song Two"]
+
+
+@pytest.mark.asyncio
+async def test_album_details_numeric_jiosaavn_lookup(service, mock_catalog, monkeypatch):
+    # Tests that numeric album IDs (like 58371014) resolve directly via JioSaavn
+    from unittest.mock import MagicMock
+    mock_resolver = MagicMock()
+    mock_resolver.get_album_details = AsyncMock(return_value={
+        "id": "saavn:58371014",
+        "title": "Devara Part 1 - Telugu",
+        "songs": [
+            {
+                "id": "saavn:song-1",
+                "title": "Fear Song",
+                "artist": "Anirudh Ravichander",
+                "duration": "195",
+                "stream_url": "https://cdn.example/fear.mp4",
+            }
+        ]
+    })
+    monkeypatch.setattr("api.stream_fallback.get_stream_fallback_resolver", lambda: mock_resolver)
+
+    res = await service.album_details("58371014")
+    assert res is not None
+    assert res["name"] == "Devara Part 1 - Telugu"
+    assert len(res["tracks"]) == 1
+    assert res["tracks"][0]["title"] == "Fear Song"
+
+
+@pytest.mark.asyncio
+async def test_artist_details_albums_prioritize_seokey(service, mock_catalog):
+    # Tests that artist_details produces albums with canonical SEO keys, never raw numeric IDs
+    mock_catalog.get_artist_info = AsyncMock(return_value=[{
+        "seokey": "anirudh-ravichander",
+        "name": "Anirudh Ravichander",
+        "top_tracks": [
+            {
+                "track_id": "101",
+                "title": "Track 1",
+                "album": "Mass Level",
+                "album_id": "1977456",  # raw numeric Gaana ID
+                "album_seokey": "mass-level-anirudh-ravichander",  # canonical seokey
+            },
+            {
+                "track_id": "102",
+                "title": "Track 2",
+                "album": "Coolie",
+                "album_id": "223344",
+                "album_seokey": "",  # missing seokey, should slugify album title
+            },
+        ]
+    }])
+    mock_catalog.search_albums = AsyncMock(return_value=[])
+
+    res = await service.artist_details("anirudh-ravichander", 10)
+    assert res is not None
+    albums = res["albums"]
+    assert len(albums) == 2
+    # First album should use album_seokey
+    assert albums[0]["id"] == "mass-level-anirudh-ravichander"
+    assert albums[0]["seokey"] == "mass-level-anirudh-ravichander"
+    # Second album should slugify title instead of using raw numeric "223344"
+    assert albums[1]["id"] == "coolie"
+    assert albums[1]["seokey"] == "coolie"
+
+
