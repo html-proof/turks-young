@@ -523,7 +523,7 @@ class StreamFallbackResolver:
         if not clean_id:
             return {}
 
-        cache_key = f"stream_fallback:album_details:{clean_id}"
+        cache_key = f"stream_fallback:album_details:v2:{clean_id}"
         if self._cache:
             try:
                 cached = await self._cache.get(cache_key)
@@ -534,7 +534,12 @@ class StreamFallbackResolver:
             except Exception:
                 pass
 
-        details_url = f"https://www.jiosaavn.com/api.php?__call=content.getAlbumDetails&albumid={quote(clean_id)}&_format=json"
+        # Search cards can contain either a numeric album ID or the opaque
+        # token from a permalink. The provider accepts them on different APIs.
+        if clean_id.isdigit():
+            details_url = f"https://www.jiosaavn.com/api.php?__call=content.getAlbumDetails&albumid={quote(clean_id, safe='')}&_format=json"
+        else:
+            details_url = f"https://www.jiosaavn.com/api.php?__call=webapi.get&token={quote(clean_id, safe='')}&type=album&_format=json"
         try:
             session = await self._get_session()
             async with session.get(details_url) as resp:

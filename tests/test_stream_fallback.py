@@ -15,6 +15,28 @@ from api.functions import Functions
 from api.errors import Errors
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('identifier,parameter', [
+    ('saavn-RGoDuFAQzcE_', 'token=RGoDuFAQzcE_'),
+    ('saavn-album-1078350', 'albumid=1078350'),
+])
+async def test_album_identifiers_return_tracklist(identifier, parameter):
+    resolver = StreamFallbackResolver(cache=None)
+    response = AsyncMock()
+    response.status = 200
+    response.json.return_value = {
+        'title': 'Amrutham', 'songs': [
+            {'id': 'song1', 'song': 'O Sinaba', 'duration': '228'},
+        ],
+    }
+    session = MagicMock()
+    session.get.return_value.__aenter__.return_value = response
+    resolver._get_session = AsyncMock(return_value=session)
+    result = await resolver.get_album_details(identifier)
+    assert parameter in session.get.call_args.args[0]
+    assert result['songs'][0]['title'] == 'O Sinaba'
+
+
 @pytest.mark.parametrize("key", [b"38346591", b"38343638"])
 def test_decrypt_url_des(key: bytes):
     resolver = StreamFallbackResolver(cache=None)
