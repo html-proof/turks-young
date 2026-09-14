@@ -69,8 +69,9 @@ def _candidate_score(candidate: dict[str, Any], track: dict[str, Any]) -> int:
 
 class LRCLibProvider(LyricsProvider):
     BASE_URL = "https://lrclib.net/api"
+    DEFAULT_USER_AGENT = "MusicHub/1.0 (https://github.com/html-proof/turks-young; support@musichub.app)"
 
-    def __init__(self, session: aiohttp.ClientSession | None = None, user_agent: str = "MusicHub/1.0", timeout: float = 10.0):
+    def __init__(self, session: aiohttp.ClientSession | None = None, user_agent: str = "MusicHub/1.0", timeout: float = 4.0):
         # Cloudflare on lrclib.net rejects requests containing X-Forwarded-For or CF-IPCountry headers with HTTP 503.
         # If a session with these headers is passed, create a clean dedicated session instead.
         self._owned_session = False
@@ -88,7 +89,8 @@ class LRCLibProvider(LyricsProvider):
         else:
             self.session = session
 
-        self.headers = {"User-Agent": user_agent, "Accept": "application/json"}
+        ua = self.DEFAULT_USER_AGENT if (not user_agent or user_agent == "MusicHub/1.0") else user_agent
+        self.headers = {"User-Agent": ua, "Accept": "application/json"}
         self.timeout = aiohttp.ClientTimeout(total=timeout)
 
     async def close(self):
@@ -115,7 +117,7 @@ class LRCLibProvider(LyricsProvider):
                             retry_after = 5
                         raise LyricsRateLimited(retry_after)
                     if response.status in (500, 502, 503, 504) and attempt == 0:
-                        await asyncio.sleep(0.3)
+                        await asyncio.sleep(0.1)
                         continue
                     response.raise_for_status()
                     return await response.json()
@@ -124,7 +126,7 @@ class LRCLibProvider(LyricsProvider):
             except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
                 last_exc = exc
                 if attempt == 0:
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.1)
                     continue
                 detail = f"{exc.__class__.__name__}: {exc}" if str(exc) else exc.__class__.__name__
                 raise LyricsProviderError(f"Lyrics provider is unavailable ({detail})") from exc
@@ -212,7 +214,11 @@ class LRCLibProvider(LyricsProvider):
         seen_ids = set()
         last_provider_error: LyricsProviderError | None = None
 
-        for query_params in search_queries:
+        # Check initial targeted queries sequentially to return immediately on exact match
+        initial_queries = search_queries[:2]
+        fallback_queries = search_queries[2:]
+
+        for query_params in initial_queries:
             try:
                 candidates = await self._request("search", query_params)
                 if isinstance(candidates, list):
@@ -240,6 +246,33 @@ class LRCLibProvider(LyricsProvider):
                 continue
             except Exception:
                 pass
+
+        # If primary queries yielded no verified match, run remaining fallback queries concurrently
+        if fallback_queries:
+            tasks = [self._request("search", q) for q in fallback_queries]
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            verified_candidates = []
+            for res in batch_results:
+                if isinstance(res, list):
+                    for cand in res:
+                        cand_id = cand.get("id")
+                        if cand_id and cand_id not in seen_ids:
+                            seen_ids.add(cand_id)
+                            all_candidates.append(cand)
+                        if cand.get("syncedLyrics") or cand.get("plainLyrics") or cand.get("instrumental"):
+                            valid, score, _ = LyricsVerifier.verify_candidate(cand, fingerprint)
+                            if valid:
+                                verified_candidates.append((score, cand))
+                elif isinstance(res, LyricsRateLimited):
+                    raise res
+                elif isinstance(res, LyricsProviderError):
+                    last_provider_error = res
+
+            if verified_candidates:
+                score, best = max(verified_candidates, key=lambda item: item[0])
+                best["_verified"] = True
+                best["_verification_score"] = score
+                return best
 
         if not all_candidates:
             if last_provider_error and not seen_ids:

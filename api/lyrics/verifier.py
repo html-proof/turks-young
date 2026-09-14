@@ -3,13 +3,15 @@ from typing import Any
 
 from api.lyrics.fingerprint import (
     TrackFingerprint,
+    clean_song_title,
     create_track_fingerprint,
     extract_version_type,
     normalize_artist_name,
     normalize_text,
+    strip_version_tag,
 )
 
-MIN_CONFIDENCE_THRESHOLD = 850
+MIN_CONFIDENCE_THRESHOLD = 750
 
 
 def text_similarity(s1: str, s2: str) -> float:
@@ -115,9 +117,17 @@ class LyricsVerifier:
             reasons.append("exact_provider_track_id (+900)")
 
         # 3. Title Verification
+        cand_clean_title = clean_song_title(cand_title)
+        cand_base_title = strip_version_tag(cand_title)
+        target_base_title = strip_version_tag(target.title)
+
         title_sim = max(
             text_similarity(cand_title, target.title),
             text_similarity(cand_title, target.clean_title),
+            text_similarity(cand_clean_title, target.title),
+            text_similarity(cand_clean_title, target.clean_title),
+            text_similarity(cand_base_title, target_base_title),
+            text_similarity(cand_clean_title, target_base_title),
         )
         if title_sim >= 0.98:
             score += 500
@@ -137,7 +147,10 @@ class LyricsVerifier:
         target_art_norm = target.normalized_primary_artist
         cand_art_norm = normalize_artist_name(cand_artist)
 
-        art_sim = artist_similarity(cand_artist, target.primary_artist)
+        art_sim = max(
+            artist_similarity(cand_artist, target.primary_artist),
+            artist_similarity(cand_artist, target.all_artists) if target.all_artists else 0.0,
+        )
         # Check against all featured artists if present
         featured_sims = [artist_similarity(cand_artist, fa) for fa in target.featured_artists]
         max_featured_sim = max(featured_sims) if featured_sims else 0.0
@@ -169,14 +182,14 @@ class LyricsVerifier:
                 score -= 900
                 reasons.append(f"karaoke_mismatch (-900, target={target.version_type}, cand={cand_version})")
             elif cand_version == "remix" or target.version_type == "remix":
-                score -= 700
-                reasons.append(f"remix_mismatch (-700, target={target.version_type}, cand={cand_version})")
+                score -= 800
+                reasons.append(f"remix_mismatch (-800, target={target.version_type}, cand={cand_version})")
             elif cand_version == "live" or target.version_type == "live":
-                score -= 700
-                reasons.append(f"live_mismatch (-700, target={target.version_type}, cand={cand_version})")
+                score -= 800
+                reasons.append(f"live_mismatch (-800, target={target.version_type}, cand={cand_version})")
             elif cand_version in ("acoustic", "unplugged", "reprise") or target.version_type in ("acoustic", "unplugged", "reprise"):
-                score -= 700
-                reasons.append(f"acoustic_reprise_mismatch (-700, target={target.version_type}, cand={cand_version})")
+                score -= 150
+                reasons.append(f"acoustic_reprise_variation (-150, target={target.version_type}, cand={cand_version})")
             else:
                 score -= 500
                 reasons.append(f"version_mismatch (-500, target={target.version_type}, cand={cand_version})")

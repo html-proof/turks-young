@@ -52,11 +52,11 @@ STALE_CACHE_TTL  = int(os.getenv("STALE_CACHE_TTL",  "3600"))
 # ── Lyrics ────────────────────────────────────────────────────────────────────
 LYRICS_PROVIDER = os.getenv("LYRICS_PROVIDER", "lrclib")
 LYRICS_USER_AGENT = os.getenv(
-    "LYRICS_USER_AGENT", "MusicHub/1.0 (https://github.com/html-proof/turks-young)"
+    "LYRICS_USER_AGENT", "MusicHub/1.0 (https://github.com/html-proof/turks-young; support@musichub.app)"
 )
-LYRICS_TIMEOUT = float(os.getenv("LYRICS_TIMEOUT", "10"))
+LYRICS_TIMEOUT = float(os.getenv("LYRICS_TIMEOUT", "4"))
 TTL_LYRICS = int(os.getenv("TTL_LYRICS", "2592000"))
-TTL_LYRICS_NOT_FOUND = int(os.getenv("TTL_LYRICS_NOT_FOUND", "21600"))
+TTL_LYRICS_NOT_FOUND = int(os.getenv("TTL_LYRICS_NOT_FOUND", "300"))
 
 # JSON array owned by the backend deployment. An empty value intentionally
 # exposes an empty catalogue instead of inventing onboarding choices.

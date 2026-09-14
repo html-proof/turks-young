@@ -414,3 +414,37 @@ async def test_service_invalidates_stale_mismatched_cached_lyrics():
     assert result["plainLyrics"] == "Correct verified text"
     assert result["verified"] is True
     provider.get_lyrics.assert_awaited_once()
+
+
+def test_candidate_title_movie_noise_is_cleaned_and_verified():
+    target = create_track_fingerprint({
+        "title": "Alaakaa Loova",
+        "artists": "Sai Abhyankkar",
+        "duration_seconds": 210,
+    })
+    candidate = {
+        "trackName": 'Alaakaa Loova (From "OM Chapter 1: Udhiram - The Blood Wood") [Tamil]',
+        "artistName": "Sai Abhyankkar & Rokesh",
+        "duration": 210,
+        "plainLyrics": "Lyrics text",
+    }
+    is_verified, score, summary = LyricsVerifier.verify_candidate(candidate, target)
+    assert is_verified is True
+    assert score >= MIN_CONFIDENCE_THRESHOLD
+
+
+def test_acoustic_version_matches_original_lyrics_with_acceptable_score():
+    target = create_track_fingerprint({
+        "title": "Minnalvala (Acoustic Version)",
+        "artists": "Sid Sriram",
+        "duration_seconds": 240,
+    })
+    candidate = {
+        "trackName": "Minnalvala",
+        "artistName": "Sid Sriram",
+        "duration": 240,
+        "plainLyrics": "Lyrics text",
+    }
+    is_verified, score, summary = LyricsVerifier.verify_candidate(candidate, target)
+    assert is_verified is True
+    assert score >= MIN_CONFIDENCE_THRESHOLD

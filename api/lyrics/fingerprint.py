@@ -50,7 +50,7 @@ _NOISE_TAGS = re.compile(
     re.IGNORECASE,
 )
 _FROM_MOVIE_TAGS = re.compile(
-    r"\s*[\(\[](?:from\s+[\"']?[^\)\]]+[\"']?|from\s+the\s+(?:movie|film)\s+[\"']?[^\)\]]+[\"']?)[\]\)]",
+    r"\s*[\(\[](?:from\s+[\"'\u201c\u201d]?[^\)\]]+[\"'\u201c\u201d]?|from\s+the\s+(?:movie|film)\s+[\"'\u201c\u201d]?[^\)\]]+[\"'\u201c\u201d]?)[\]\)]",
     re.IGNORECASE,
 )
 _OST_TAGS = re.compile(
@@ -58,11 +58,15 @@ _OST_TAGS = re.compile(
     re.IGNORECASE,
 )
 _LANGUAGE_TAGS = re.compile(
-    r"\s*[\(\[](?:malayalam|telugu|tamil|hindi|kannada|punjabi|bengali|marathi|english|arabic)[\]\)]",
+    r"\s*[\(\[](?:malayalam|telugu|tamil|hindi|kannada|punjabi|bengali|marathi|english|arabic|gujarati|odia)(?:\s+(?:track|song|version|audio))?[\]\)]",
     re.IGNORECASE,
 )
 _DASH_NOISE = re.compile(
-    r"\s*-\s*(?:from\s+[^\-]+|official[^\-]*|lyrical[^\-]*|original\s+soundtrack|theme|promo|full\s+song|reprise).*",
+    r"\s*[-–—|]\s*(?:from\s+[^\-–—|]+|official[^\-–—|]*|lyrical[^\-–—|]*|original\s+(?:motion\s+picture\s+)?soundtrack|soundtrack|ost|theme|promo|full\s+song|reprise).*",
+    re.IGNORECASE,
+)
+_UNBRACKETED_FROM = re.compile(
+    r"\s+\bfrom\s+[\"'\u201c\u201d][^\"'\u201c\u201d]+[\"'\u201c\u201d]",
     re.IGNORECASE,
 )
 
@@ -103,6 +107,19 @@ def normalize_artist_name(name: str) -> str:
     return base.strip()
 
 
+_VERSION_TAG_BRACKETS = re.compile(
+    r"\s*[\(\[][^\)\]]*(?:remix|mix|live|acoustic|unplugged|karaoke|cover|reprise|sped\s+up|slowed)[^\)\]]*[\]\)]",
+    re.IGNORECASE,
+)
+
+
+def strip_version_tag(title: str) -> str:
+    """Strip bracketed version markers to yield the underlying base song title."""
+    raw = str(title or "").strip()
+    cleaned = _VERSION_TAG_BRACKETS.sub("", raw).strip()
+    return _SPACE.sub(" ", cleaned).strip() or raw
+
+
 def extract_version_type(title: str) -> str:
     """Detect version tag from track title or subtitle."""
     text = str(title or "").lower()
@@ -119,6 +136,7 @@ def clean_song_title(title: str) -> str:
         return ""
     s = _NOISE_TAGS.sub("", raw)
     s = _FROM_MOVIE_TAGS.sub("", s)
+    s = _UNBRACKETED_FROM.sub("", s)
     s = _OST_TAGS.sub("", s)
     s = _LANGUAGE_TAGS.sub("", s)
     s = _DASH_NOISE.sub("", s)

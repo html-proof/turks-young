@@ -24,9 +24,8 @@ async def _lyrics_for_track(
 ):
     cache = getattr(request.app.state, "cache", None)
     cache_key = f"songs:info:{track_id}"
-    # The player already supplies these fields. Avoid a second music-provider
-    # round trip before even checking the lyrics cache.
-    supplied_metadata = bool(title and artist and duration and duration > 0)
+    # If title is provided, use it directly without blocking on upstream gaanapy lookup
+    supplied_metadata = bool(title and str(title).strip())
     tracks = None
     if not supplied_metadata and cache:
         try:
