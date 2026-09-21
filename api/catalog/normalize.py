@@ -47,7 +47,7 @@ def _upgrade_image_quality(url: str | None) -> str | None:
     url = re.sub(r'size_[smx]+(?=[_0-9\.\-])', 'size_l', url, flags=re.IGNORECASE)
     url = re.sub(r'img_[smx]+(?=[_0-9\.\-])', 'img_l', url, flags=re.IGNORECASE)
 
-    # JioSaavn / Saavn and standard CDNs: 50x50, 150x150, 250x250, 320x320 -> 500x500 HD
+    # Standard CDN thumbnail sizes: 50x50, 150x150, 250x250, 320x320 -> 500x500 HD
     url = re.sub(r'[-_](?:50x50|80x80|150x150|250x250|320x320)([-_/\.\?])', r'-500x500\1', url, flags=re.IGNORECASE)
     url = re.sub(r'[-_](?:50x50|80x80|150x150|250x250|320x320)$', r'-500x500', url, flags=re.IGNORECASE)
     url = re.sub(r'/(?:50x50|80x80|150x150|250x250|320x320)/', r'/500x500/', url, flags=re.IGNORECASE)
@@ -607,7 +607,7 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         or streams.get("very_high_quality") or streams.get("low_quality")
         or direct_stream or None
     )
-    if stream_final and "320.mp4" in stream_final and "saavn" not in stream_final:
+    if stream_final and "320.mp4" in stream_final:
         stream_final = stream_final.replace("320.mp4", "128.mp4")
     artist_image_url = normalize_url(item.get("artist_image"))
     if not artist_image_url and artists and artists[0].get("image_url"):

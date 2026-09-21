@@ -44,20 +44,6 @@ class Albums:
                 album_info = []
 
         if not album_info or (isinstance(album_info, dict) and "error" in album_info):
-            fallback_res = getattr(self, "_fallback_resolver", None)
-            if not fallback_res:
-                try:
-                    from api.stream_fallback import get_stream_fallback_resolver
-                    fallback_res = get_stream_fallback_resolver()
-                except Exception:
-                    fallback_res = None
-            if fallback_res:
-                try:
-                    fb_albums = await fallback_res.search_albums(clean_q, limit)
-                    if fb_albums:
-                        return fb_albums
-                except Exception:
-                    pass
             return await errors.no_results()
 
         return album_info

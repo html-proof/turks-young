@@ -182,34 +182,6 @@ async def test_album_details_with_dict_artist_dedup(service, mock_catalog):
 
 
 @pytest.mark.asyncio
-async def test_album_details_numeric_jiosaavn_lookup(service, mock_catalog, monkeypatch):
-    # Tests that numeric album IDs (like 58371014) resolve directly via JioSaavn
-    from unittest.mock import MagicMock
-    mock_resolver = MagicMock()
-    mock_resolver.get_album_details = AsyncMock(return_value={
-        "id": "saavn:58371014",
-        "title": "Devara Part 1 - Telugu",
-        "songs": [
-            {
-                "id": "saavn:song-1",
-                "title": "Fear Song",
-                "artist": "Anirudh Ravichander",
-                "duration": "195",
-                "stream_url": "https://cdn.example/fear.mp4",
-            }
-        ]
-    })
-    mock_catalog.get_album_info = AsyncMock(return_value=[])
-    monkeypatch.setattr("api.stream_fallback.get_stream_fallback_resolver", lambda: mock_resolver)
-
-    res = await service.album_details("58371014")
-    assert res is not None
-    assert res["name"] == "Devara Part 1 - Telugu"
-    assert len(res["tracks"]) == 1
-    assert res["tracks"][0]["title"] == "Fear Song"
-
-
-@pytest.mark.asyncio
 async def test_artist_details_albums_prioritize_seokey(service, mock_catalog):
     # Tests that artist_details produces albums with canonical SEO keys, never raw numeric IDs
     mock_catalog.get_artist_info = AsyncMock(return_value=[{

@@ -27,7 +27,7 @@ def normalize_url(value, provider_base=None):
         path = url.path.lower()
         if any(token in path for token in ("placeholder", "artist-default", "default-album")) or path.endswith(".html"):
             return None
-        if url.scheme == "http" and url.hostname.endswith((".saavncdn.com", ".gaanacdn.com")):
+        if url.scheme == "http" and url.hostname.endswith(".gaanacdn.com"):
             url = url._replace(scheme="https")
         return urlunsplit(url)
     except ValueError:

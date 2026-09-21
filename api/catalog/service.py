@@ -917,31 +917,14 @@ class CatalogService:
             requested = min(page * limit + 10, 100)
             if kind == "song":
                 async def load_songs_parallel():
-                    async def fetch_gaana():
-                        try:
-                            return _clean(await asyncio.wait_for(methods["song"](effective_query, requested), timeout=2.2))
-                        except Exception as exc:
-                            logger.debug("Gaana song search failed: %s", exc)
-                            return []
-
-                    async def fetch_saavn():
-                        try:
-                            from unittest.mock import Mock
-                            if isinstance(self.catalog, Mock) or type(self.catalog).__name__.startswith("Fake"):
-                                return []
-                            from api.stream_fallback import get_stream_fallback_resolver
-                            fb_resolver = get_stream_fallback_resolver()
-                            return await asyncio.wait_for(fb_resolver.search_tracks(effective_query, requested), timeout=2.0)
-                        except Exception as exc:
-                            logger.debug("JioSaavn song search failed: %s", exc)
-                            return []
-
-                    gaana_res, saavn_res = await asyncio.gather(fetch_gaana(), fetch_saavn())
+                    try:
+                        gaana_res = _clean(await asyncio.wait_for(methods["song"](effective_query, requested), timeout=2.2))
+                    except Exception as exc:
+                        logger.debug("Gaana song search failed: %s", exc)
+                        gaana_res = []
                     combined_songs = []
-                    if gaana_res and not isinstance(gaana_res, Exception):
+                    if gaana_res:
                         combined_songs.extend(items(gaana_res, "song"))
-                    if saavn_res and not isinstance(saavn_res, Exception):
-                        combined_songs.extend(items(saavn_res, "song"))
                     return combined_songs
 
                 candidate_songs = await self._cached(
@@ -974,33 +957,16 @@ class CatalogService:
                 )
             elif kind == "album":
                 async def load_albums_parallel():
-                    async def fetch_gaana():
-                        try:
-                            return _clean(await asyncio.wait_for(methods["album"](effective_query, requested), timeout=2.2))
-                        except Exception as exc:
-                            logger.debug("Gaana album search failed: %s", exc)
-                            return []
-
-                    async def fetch_saavn():
-                        try:
-                            from unittest.mock import Mock
-                            if isinstance(self.catalog, Mock) or type(self.catalog).__name__.startswith("Fake"):
-                                return []
-                            from api.stream_fallback import get_stream_fallback_resolver
-                            fb_resolver = get_stream_fallback_resolver()
-                            return await asyncio.wait_for(fb_resolver.search_albums(effective_query, requested), timeout=2.0)
-                        except Exception as exc:
-                            logger.debug("JioSaavn album search failed: %s", exc)
-                            return []
-
-                    gaana_res, saavn_res = await asyncio.gather(fetch_gaana(), fetch_saavn())
+                    try:
+                        gaana_res = _clean(await asyncio.wait_for(methods["album"](effective_query, requested), timeout=2.2))
+                    except Exception as exc:
+                        logger.debug("Gaana album search failed: %s", exc)
+                        gaana_res = []
                     combined_albums = []
-                    if gaana_res and not isinstance(gaana_res, Exception):
+                    if gaana_res:
                         combined_albums.extend(items(gaana_res, "album"))
-                    if saavn_res and not isinstance(saavn_res, Exception):
-                        combined_albums.extend(items(saavn_res, "album"))
                     if not combined_albums:
-                        raise TimeoutError("album search providers returned no results")
+                        raise TimeoutError("album search provider returned no results")
                     await self._backfill_album_artwork(combined_albums)
                     return combined_albums
 
@@ -1221,18 +1187,6 @@ class CatalogService:
         # Multi-search (all categories combined)
         preview = min(max(limit * 2, 12), 25)
         async def load_all():
-            async def fetch_saavn():
-                try:
-                    from unittest.mock import Mock
-                    if isinstance(self.catalog, Mock) or type(self.catalog).__name__.startswith("Fake"):
-                        return []
-                    from api.stream_fallback import get_stream_fallback_resolver
-                    fb_resolver = get_stream_fallback_resolver()
-                    return await asyncio.wait_for(fb_resolver.search_tracks(effective_query, preview), timeout=2.0)
-                except Exception as exc:
-                    logger.debug("JioSaavn parallel multi-search failed: %s", exc)
-                    return []
-
             async def safe_search(m):
                 try:
                     return await asyncio.wait_for(m(effective_query, preview), timeout=2.2)
@@ -1240,7 +1194,7 @@ class CatalogService:
                     logger.debug("Provider search method failed: %s", exc)
                     return exc
 
-            tasks = [safe_search(method) for method in methods.values()] + [fetch_saavn()]
+            tasks = [safe_search(method) for method in methods.values()]
             res = await asyncio.gather(*tasks, return_exceptions=True)
             # A provider outage is not a successful negative search. Let the
             # request fail (and the client retry) rather than caching no matches.
@@ -1268,10 +1222,6 @@ class CatalogService:
             cursor += 1
             if not isinstance(result, Exception):
                 candidates.extend(items(_clean(result), result_kind))
-            if result_kind == "song" and len(results) > 4:
-                saavn_res = results[4]
-                if saavn_res and not isinstance(saavn_res, Exception) and isinstance(saavn_res, list):
-                    candidates.extend(items(saavn_res, "song"))
             grouped[f"{result_kind}s"] = rank(
                 effective_query,
                 candidates,
@@ -1635,16 +1585,6 @@ class CatalogService:
             return None
 
         async def load() -> dict[str, Any] | None:
-            if album_id.startswith("saavn"):
-                try:
-                    from api.stream_fallback import get_stream_fallback_resolver
-                    fb_res = get_stream_fallback_resolver()
-                    saavn_alb = await fb_res.get_album_details(album_id)
-                    if saavn_alb and (saavn_alb.get("songs") or saavn_alb.get("tracks")):
-                        return album(saavn_alb)
-                except Exception as exc:
-                    logger.debug("JioSaavn direct album_details failed for %s: %s", album_id, exc)
-
             normalized_album = None
             merged_tracks: list[dict[str, Any]] = []
             seen_tracks: set[str] = set()
@@ -1688,8 +1628,8 @@ class CatalogService:
                 normalized_album["has_more"] = not normalized_album["is_complete"]
                 return normalized_album
 
-            # JioSaavn fallback: try resolving tracks from JioSaavn when Gaana
-            # returns album metadata but no playable tracks.
+            # When Gaana returns album metadata but no playable tracks, fall back
+            # to a Gaana title search (Step B below) to recover the tracklist.
             album_meta = normalized_album or {}
             raw_fb_title = (
                 album_meta.get("name")
@@ -1722,72 +1662,8 @@ class CatalogService:
 
             fb_candidates = _generate_album_query_candidates(raw_fb_title)
 
-            # Step A: JioSaavn fallback
-            if fb_candidates:
-                try:
-                    from api.stream_fallback import get_stream_fallback_resolver
-                    fb_res = get_stream_fallback_resolver()
-                    for cand_q in fb_candidates[:3]:
-                        try:
-                            fb_albums = await asyncio.wait_for(fb_res.search_albums(cand_q, 8), timeout=4.0)
-                            if fb_albums:
-                                cand_core = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', cand_q).strip().lower()
-                                for fb_alb in fb_albums:
-                                    fb_alb_title = str(fb_alb.get("title") or fb_alb.get("name") or "").strip()
-                                    if not fb_alb_title:
-                                        continue
-                                    fb_alb_core = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', fb_alb_title).strip().lower()
-                                    matched = (
-                                        cand_core == fb_alb_core
-                                        or (cand_core and len(cand_core) >= 3 and cand_core in fb_alb_core)
-                                        or (fb_alb_core and len(fb_alb_core) >= 3 and fb_alb_core in cand_core)
-                                        or (cand_q.lower() in fb_alb_title.lower())
-                                        or (fb_alb_title.lower() in cand_q.lower())
-                                    )
-                                    if matched:
-                                        fb_alb_id = str(fb_alb.get("id") or fb_alb.get("album_id") or "")
-                                        if fb_alb_id:
-                                            fb_details = await asyncio.wait_for(fb_res.get_album_details(fb_alb_id), timeout=4.0)
-                                            raw_fb_songs = (fb_details.get("songs") or fb_details.get("tracks") or []) if fb_details else []
-                                            if raw_fb_songs:
-                                                norm_fb_songs = [song(s) for s in raw_fb_songs if isinstance(s, dict)]
-                                                result_album = album_meta.copy() if album_meta else {}
-                                                result_album.update({
-                                                    "id": result_album.get("id") or album_id,
-                                                    "seokey": result_album.get("seokey") or album_id,
-                                                    "name": result_album.get("name") or fb_details.get("title") or fb_details.get("name") or raw_fb_title,
-                                                    "title": result_album.get("title") or fb_details.get("title") or fb_details.get("name") or raw_fb_title,
-                                                    "tracks": norm_fb_songs,
-                                                    "songs": norm_fb_songs,
-                                                    "song_count": len(norm_fb_songs),
-                                                    "trackCount": len(norm_fb_songs),
-                                                    "expected_track_count": len(norm_fb_songs),
-                                                    "loaded_track_count": len(norm_fb_songs),
-                                                    "is_complete": True,
-                                                    "has_more": False,
-                                                })
-                                                if not result_album.get("artists"):
-                                                    fb_art = fb_details.get("artist")
-                                                    if fb_art:
-                                                        result_album["artistNames"] = [fb_art] if isinstance(fb_art, str) else []
-                                                        result_album["artists"] = [{"id": "", "name": fb_art}] if isinstance(fb_art, str) else []
-                                                if not result_album.get("image_url"):
-                                                    fb_img = fb_details.get("image_url") or fb_details.get("artworkUrl") or ""
-                                                    if fb_img:
-                                                        result_album["image_url"] = fb_img
-                                                        result_album["imageUrl"] = fb_img
-                                                        result_album["artworkUrl"] = fb_img
-                                                logger.info(
-                                                    "album_details JioSaavn fallback success album_id=%s saavn_title=%s tracks=%d",
-                                                    album_id, fb_alb_title, len(norm_fb_songs),
-                                                )
-                                                return result_album
-                        except Exception as exc:
-                            logger.debug("album_details JioSaavn search attempt failed cand=%s: %s", cand_q, exc)
-                except Exception as exc:
-                    logger.debug("album_details JioSaavn track fallback failed title=%s: %s", raw_fb_title, exc)
-
-            # Step B: Resilient fallback: Search by album title / query if direct album info returned empty
+            # Resilient fallback: search Gaana by album title / query when the
+            # direct album lookup returned no tracks.
             for query in fb_candidates:
                 try:
                     album_search = _clean(await asyncio.wait_for(self.catalog.search_albums(query, 5), timeout=3.5))
@@ -1864,17 +1740,6 @@ class CatalogService:
 
             if normalized_album and (normalized_album.get("tracks") or normalized_album.get("songs")):
                 return normalized_album
-
-            # If album_id is numeric and Gaana returned no tracks, try JioSaavn direct lookup as fallback
-            if album_id.isdigit():
-                try:
-                    from api.stream_fallback import get_stream_fallback_resolver
-                    fb_res = get_stream_fallback_resolver()
-                    saavn_alb = await fb_res.get_album_details(album_id)
-                    if saavn_alb and (saavn_alb.get("songs") or saavn_alb.get("tracks")):
-                        return album(saavn_alb)
-                except Exception as exc:
-                    logger.debug("JioSaavn numeric album_details fallback failed for %s: %s", album_id, exc)
 
             # Never return a 200 OK with zero tracks when an album is requested!
             # Returning a 0-track payload causes Cloudflare and clients to cache a broken empty state.

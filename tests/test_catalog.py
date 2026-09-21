@@ -824,40 +824,6 @@ def test_album_title_key_ignores_soundtrack_boilerplate():
 
 
 @pytest.mark.asyncio
-async def test_album_details_backfills_secondary_provider_cover_from_primary(monkeypatch):
-    import api.stream_fallback as stream_fallback
-
-    class FakeResolver:
-        async def get_album_details(self, album_id):
-            return {
-                "id": "saavn:xmnh", "seokey": "saavn-album-xmnh",
-                "title": "Annan Thampi", "name": "Annan Thampi", "artist": "Rahul Raj",
-                "image_url": None, "artworkUrl": None,
-                "songs": [{
-                    "id": "saavn:1", "seokey": "saavn-1", "title": "Kanmaniye",
-                    "artist": "Rahul Raj", "album": "Annan Thampi", "image_url": None,
-                }],
-            }
-
-    monkeypatch.setattr(stream_fallback, "get_stream_fallback_resolver", lambda: FakeResolver())
-    catalog = FakeCatalog()
-    catalog.search_albums = AsyncMock(return_value=[{
-        "seokey": "annan-thampi-original-motion-picture-soundtrack", "album_id": "77",
-        "title": "Annan Thampi (Original Motion Picture Soundtrack)",
-        "artists": "Jassie Gift, Rahul Raj",
-        "images": {"urls": {"large_artwork": "https://a10.gaanacdn.com/annan/size_l.jpg"}},
-    }])
-    service = CatalogService(catalog, configured_languages())
-
-    result = await service.album_details("saavn-xmnh")
-
-    assert result["image_url"] == "https://a10.gaanacdn.com/annan/size_l.jpg"
-    assert result["artworkUrl"] == "https://a10.gaanacdn.com/annan/size_l.jpg"
-    assert result["tracks"][0]["image_url"] == "https://a10.gaanacdn.com/annan/size_l.jpg"
-    assert catalog.search_albums.await_args.args[0] == "annan thampi"
-
-
-@pytest.mark.asyncio
 async def test_album_search_backfills_missing_cover_from_primary_provider():
     catalog = FakeCatalog()
     catalog.search_albums = AsyncMock(side_effect=[

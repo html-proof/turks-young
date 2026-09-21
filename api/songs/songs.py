@@ -29,20 +29,6 @@ class Songs:
                         break
 
         if len(entries) == 0:
-            fallback_res = getattr(self, "_fallback_resolver", None)
-            if not fallback_res:
-                try:
-                    from api.stream_fallback import get_stream_fallback_resolver
-                    fallback_res = get_stream_fallback_resolver()
-                except Exception:
-                    fallback_res = None
-            if fallback_res:
-                try:
-                    fb_tracks = await fallback_res.search_tracks(clean_q, limit)
-                    if fb_tracks:
-                        return fb_tracks
-                except Exception:
-                    pass
             return await errors.no_results()
 
         track_ids = []
@@ -232,25 +218,5 @@ class Songs:
             or data['stream_urls']['urls'].get('low_quality')
             or ""
         )
-
-        # Fallback stream resolution if Gaana has no playable audio stream
-        if resolve_stream and not data['stream_url'] and data.get('title'):
-            fallback_res = getattr(self, "_fallback_resolver", None)
-            if not fallback_res:
-                try:
-                    from api.stream_fallback import get_stream_fallback_resolver
-                    fallback_res = get_stream_fallback_resolver()
-                except Exception:
-                    fallback_res = None
-            if fallback_res:
-                try:
-                    fb = await fallback_res.resolve_stream(data['title'], data.get('artists') or '')
-                    if fb and fb.get('stream_url'):
-                        data['stream_url'] = fb['stream_url']
-                        fb_urls = fb.get('stream_urls', {}).get('urls', {})
-                        for k, v in fb_urls.items():
-                            data['stream_urls']['urls'][k] = v
-                except Exception:
-                    pass
 
         return data
