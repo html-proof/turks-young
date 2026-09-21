@@ -55,16 +55,47 @@ class Playlists:
         upstream_error = result.get("error") if isinstance(result, dict) else None
         if upstream_error not in (None, "", "SUCCESS"):
             return result
-        track_count = result.get('count')
-        if not track_count:
+        tracks = result.get('tracks') or result.get('songs') or []
+        if not isinstance(tracks, list) or not tracks:
             return await errors.no_results()
-        track_ids = []
-        tracks = result.get('tracks', [])
-        for i in range(min(int(track_count), len(tracks))):
-            seo = tracks[i].get('seokey') if isinstance(tracks[i], dict) else None
-            if seo:
-                track_ids.append(seo)
-        if len(track_ids) == 0:
+
+        # Newer playlist responses often omit `seokey` while still providing
+        # complete embedded track data and a numeric `track_id`. The previous
+        # parser discarded every such entry, leaving the app at
+        # "0 soundtracks" forever.
+        formatted_tracks = []
+        unresolved_ids = []
+        for raw in tracks:
+            if not isinstance(raw, dict):
+                continue
+            effective_id = str(
+                raw.get('seokey')
+                or raw.get('seo')
+                or raw.get('track_id')
+                or raw.get('id')
+                or ''
+            ).strip()
+            if not effective_id:
+                continue
+
+            candidate = dict(raw)
+            candidate.setdefault('seokey', effective_id)
+            title = candidate.get('track_title') or candidate.get('title') or candidate.get('name')
+            if title:
+                formatted = await self.format_json_songs(candidate, resolve_stream=False)
+                if isinstance(formatted, dict) and 'error' not in formatted:
+                    formatted_tracks.append(formatted)
+                    continue
+            unresolved_ids.append(effective_id)
+
+        if unresolved_ids:
+            resolved = await self.get_track_info(unresolved_ids)
+            if isinstance(resolved, list):
+                formatted_tracks.extend(
+                    track for track in resolved
+                    if isinstance(track, dict) and 'error' not in track
+                )
+
+        if not formatted_tracks:
             return await errors.no_results()
-        track_data = await self.get_track_info(track_ids)
-        return track_data
+        return formatted_tracks

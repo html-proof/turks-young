@@ -72,14 +72,14 @@ class Albums:
                 return {}
             if i_str.isdigit():
                 res = await self._safe_request("POST", f"https://gaana.com/apiv2?country=IN&type=albumDetail&id={i_str}")
-                if isinstance(res, dict) and (res.get("album") or res.get("tracks")):
+                if isinstance(res, dict) and (res.get("album") or res.get("tracks") or res.get("songs")):
                     return res
                 res2 = await self._safe_request("POST", f"https://gaana.com/apiv2?country=IN&type=albumDetail&album_id={i_str}")
-                if isinstance(res2, dict) and (res2.get("album") or res2.get("tracks")):
+                if isinstance(res2, dict) and (res2.get("album") or res2.get("tracks") or res2.get("songs")):
                     return res2
                 return res if isinstance(res, dict) else {}
             res = await self._safe_request("POST", endpoints.album_details_url + encoded_id(i_str))
-            if isinstance(res, dict) and (res.get("album") or res.get("tracks")):
+            if isinstance(res, dict) and (res.get("album") or res.get("tracks") or res.get("songs")):
                 alb_meta = res.get("album") if isinstance(res.get("album"), dict) else {}
                 if (
                     str(alb_meta.get("title")).lower() != "undefined"
@@ -195,7 +195,10 @@ class Albums:
         errors = self.errors
         data = {}
 
-        album = results.get('album')
+        if not isinstance(results, dict):
+            return await errors.no_results()
+
+        album = results.get('album') if isinstance(results.get('album'), dict) else results
         if not album:
             return await errors.no_results()
 
@@ -242,12 +245,11 @@ class Albums:
         data['images']['urls']['small_artwork'] = artwork
 
         if info:
-            album_payload = album if isinstance(album, dict) else {}
             raw_tracks = (
                 results.get('tracks')
                 or results.get('songs')
-                or album_payload.get('tracks')
-                or album_payload.get('songs')
+                or album.get('tracks')
+                or album.get('songs')
                 or []
             )
             data['tracks'] = await self.get_album_tracks(data['seokey'], raw_tracks=raw_tracks, album_meta=album, fetch_missing=fetch_missing_tracks)
