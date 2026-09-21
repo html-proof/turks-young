@@ -1,7 +1,7 @@
 import asyncio
 import html
 import re
-from api.provider_search import encoded_query, search_entries
+from api.provider_search import encoded_id, encoded_query, search_entries
 
 class Songs:
     async def search_songs(self, search_query: str, limit: int) -> list:
@@ -106,7 +106,7 @@ class Songs:
 
         if missing_ids:
             results = await asyncio.gather(*[
-                self._safe_request("POST", endpoints.song_details_url + i)
+                self._safe_request("POST", endpoints.song_details_url + encoded_id(i))
                 for i in missing_ids
             ])
             for i, result in zip(missing_ids, results):

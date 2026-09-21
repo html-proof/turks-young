@@ -77,6 +77,7 @@ async def search(
     kind: Literal["song", "track", "artist", "album", "playlist"] | None = None,
     page: int = Query(1, ge=1, le=1000),
     limit: int = Query(20, ge=1, le=50),
+    exact: bool = Query(False, description="Skip spelling correction and search the query as typed."),
     user: AuthenticatedUser | None = Depends(get_optional_user),
 ):
     search_query = (q or query or "").strip()
@@ -90,8 +91,28 @@ async def search(
         page,
         limit,
         user_uid=user_uid,
+        _allow_correction=not exact,
     )
     return envelope(result, query=search_query)
+
+
+@router.get("/search/suggest", summary="Typeahead suggestions for the search box.")
+async def search_suggest(
+    request: Request,
+    q: str = Query(..., min_length=1, max_length=100),
+    limit: int = Query(8, ge=1, le=15),
+    user: AuthenticatedUser | None = Depends(get_optional_user),
+    repository=Depends(get_user_repository),
+):
+    recent: list[str] = []
+    if user:
+        try:
+            rows = await repository.list_recent_searches(user.uid, 20)
+            recent = [str(row.get("query") or "") for row in rows if isinstance(row, dict)]
+        except Exception:
+            recent = []
+    items = await _service(request).suggest(q.strip(), limit, recent)
+    return envelope({"items": items}, query=q.strip(), count=len(items))
 
 
 @router.get("/search/discover", summary="Get backend-provided search discovery sections.")
@@ -264,7 +285,7 @@ async def home(
     refresh: bool = False,
     refresh_generation: int = Query(0, ge=0),
     session_id: str | None = Query(None, max_length=100),
-    exclude_ids: str | None = Query(None),
+    exclude_ids: str | None = Query(None, max_length=4000),
     limit: int = Query(24, ge=1, le=50),
     cursor: str | None = Query(None, max_length=100),
     type: str = Query("all", pattern="^(all|song|album|artist|playlist)$"),

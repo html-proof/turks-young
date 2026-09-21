@@ -325,6 +325,8 @@ async def test_soundtrack_expansion_lightweight_no_waterfall():
 
     # Should expand soundtrack tracks into songs without error
     assert "songs" in res
+    assert res["top_result"]["type"] == "album"
+    assert res["top_result"]["item"]["id"] == "ghilli-soundtrack"
     assert len(res["songs"]) >= 2
     titles = [s["title"] for s in res["songs"]]
     assert "Appadi Podu" in titles

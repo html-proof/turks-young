@@ -1,5 +1,5 @@
 import asyncio
-from api.provider_search import encoded_query, search_entries
+from api.provider_search import encoded_id, encoded_query, search_entries
 
 
 class Albums:
@@ -78,7 +78,7 @@ class Albums:
                 if isinstance(res2, dict) and (res2.get("album") or res2.get("tracks")):
                     return res2
                 return res if isinstance(res, dict) else {}
-            res = await self._safe_request("POST", endpoints.album_details_url + i_str)
+            res = await self._safe_request("POST", endpoints.album_details_url + encoded_id(i_str))
             if isinstance(res, dict) and (res.get("album") or res.get("tracks")):
                 alb_meta = res.get("album") if isinstance(res.get("album"), dict) else {}
                 if str(alb_meta.get("title")).lower() != "undefined" and str(alb_meta.get("seokey")).lower() != "undefined":
@@ -99,7 +99,7 @@ class Albums:
         if raw_tracks is None:
             endpoints = self.api_endpoints
             i_str = str(album_id).strip()
-            url = f"https://gaana.com/apiv2?country=IN&type=albumDetail&id={i_str}" if i_str.isdigit() else (endpoints.album_details_url + i_str)
+            url = f"https://gaana.com/apiv2?country=IN&type=albumDetail&id={i_str}" if i_str.isdigit() else (endpoints.album_details_url + encoded_id(i_str))
             result = await self._safe_request("POST", url)
             if isinstance(result, dict) and "error" in result:
                 return result

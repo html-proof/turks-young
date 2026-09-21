@@ -1,5 +1,5 @@
 import asyncio
-from api.provider_search import encoded_query, search_entries
+from api.provider_search import encoded_id, encoded_query, search_entries
 
 class Artists:
     async def search_artists(self, search_query: str, limit: int) -> list:
@@ -23,7 +23,7 @@ class Artists:
         endpoints = self.api_endpoints
         errors = self.errors
         results = await asyncio.gather(*[
-            self._safe_request("POST", endpoints.artist_details_url + i)
+            self._safe_request("POST", endpoints.artist_details_url + encoded_id(i))
             for i in artist_id
         ])
         artist_info = []
@@ -47,7 +47,7 @@ class Artists:
                 return {"tracks": tracks, "total": total}
             return {"tracks": [], "total": 0}
 
-        result = await self._safe_request("POST", endpoints.artist_top_tracks + raw_id)
+        result = await self._safe_request("POST", endpoints.artist_top_tracks + encoded_id(raw_id))
         if isinstance(result, dict) and "error" in result:
             # Fallback to get_artist_info if top_tracks endpoint returned error
             info = await self.get_artist_info([raw_id], True, limit, page, fetch_missing_tracks=fetch_missing_tracks)
@@ -91,7 +91,7 @@ class Artists:
     async def get_similar_artists(self, artist_id: str, limit: int) -> dict:
         endpoints = self.api_endpoints
         errors = self.errors
-        result = await self._safe_request("GET", endpoints.similar_artists_url + artist_id)
+        result = await self._safe_request("GET", endpoints.similar_artists_url + encoded_id(artist_id))
         if isinstance(result, dict) and "error" in result:
             return result
         entities = []

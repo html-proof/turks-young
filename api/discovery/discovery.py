@@ -1,12 +1,14 @@
 import asyncio
 
+from api.provider_search import encoded_id
+
 
 class Discovery:
     """Methods for Gaana's newer discovery endpoints."""
 
     async def get_similar_albums(self, album_id: str, limit: int) -> list:
         result = await self._safe_request(
-            "GET", self.api_endpoints.similar_albums_url + album_id,
+            "GET", self.api_endpoints.similar_albums_url + encoded_id(album_id),
             headers=self._gaana_headers(),
         )
         if isinstance(result, dict) and "error" in result:
@@ -23,7 +25,7 @@ class Discovery:
     async def get_artist_tracks(self, artist_id: str, limit: int, page: int) -> dict:
         result = await self._safe_request(
             "GET",
-            self.api_endpoints.artist_tracks_url + artist_id,
+            self.api_endpoints.artist_tracks_url + encoded_id(artist_id),
             params={
                 "sortBy": "popularity", "sortOrder": 0, "request_type": "web",
                 "pkc": "true", "st": "hls", "song_type": "new",

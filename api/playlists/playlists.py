@@ -1,4 +1,4 @@
-from api.provider_search import encoded_query, search_entries
+from api.provider_search import encoded_id, encoded_query, search_entries
 
 class Playlists:
     async def search_playlists(self, search_query: str, limit: int) -> list:
@@ -51,7 +51,7 @@ class Playlists:
     async def get_playlist_info(self, playlist_id: str) -> dict:
         endpoints = self.api_endpoints
         errors = self.errors
-        result = await self._safe_request("POST", endpoints.playlist_details_url + playlist_id)
+        result = await self._safe_request("POST", endpoints.playlist_details_url + encoded_id(playlist_id))
         upstream_error = result.get("error") if isinstance(result, dict) else None
         if upstream_error not in (None, "", "SUCCESS"):
             return result

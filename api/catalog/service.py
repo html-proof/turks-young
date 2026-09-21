@@ -10,10 +10,13 @@ from pydantic import TypeAdapter, ValidationError
 
 from api.catalog.models import Language
 from api.catalog.normalize import album, artist, clean_album_or_title, items, playlist, song
-from api.catalog.search.ranking import confidence, normalize_query, rank, _strong_match, parse_query_language_and_core, _tokens
+from api.catalog.search.ranking import album_core_key, confidence, normalize_query, rank, _strong_match, parse_query_language_and_core, _tokens
+from api.catalog.search.vocabulary import SearchVocabulary
 from api.core import config
 
 logger = logging.getLogger(__name__)
+
+_SEARCH_MEM_TTL_SECONDS = 300
 
 
 def _apply_album_artwork(
@@ -107,6 +110,38 @@ def _apply_album_artwork(
     return hydrated
 
 
+def _album_title_key(title: Any) -> str:
+    return album_core_key(clean_album_or_title(title))
+
+
+def _artwork_of(item: dict[str, Any]) -> str:
+    return str(item.get("image_url") or item.get("imageUrl") or item.get("artworkUrl") or "").strip()
+
+
+def _set_artwork(item: dict[str, Any], url: str) -> None:
+    item["image_url"] = url
+    item["imageUrl"] = url
+    item["artworkUrl"] = url
+    if not item.get("images"):
+        item["images"] = {"urls": {"large_artwork": url, "medium_artwork": url, "small_artwork": url}}
+    album_val = item.get("album")
+    if isinstance(album_val, dict) and not _artwork_of(album_val):
+        item["album"] = {**album_val, "artworkUrl": url}
+
+
+def _album_artist_names(item: dict[str, Any]) -> list[str]:
+    names = [str(n) for n in (item.get("artistNames") or []) if n]
+    for a in item.get("artists") or []:
+        if isinstance(a, dict) and a.get("name"):
+            names.append(str(a["name"]))
+        elif isinstance(a, str) and a.strip():
+            names.append(a)
+    raw = item.get("artist")
+    if isinstance(raw, str) and raw.strip():
+        names.extend(part.strip() for part in raw.split(",") if part.strip())
+    return names
+
+
 class LanguageCatalog:
     _STANDARD_CODES = {
         "malayalam": "ml", "tamil": "ta", "hindi": "hi", "english": "en",
@@ -163,6 +198,26 @@ class CatalogService:
         self.db_pool = db_pool
         self._local_tasks: dict[str, asyncio.Task] = {}
         self._search_mem_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._search_mem_max_entries = 2000
+        self.vocabulary = SearchVocabulary()
+        self._vocabulary_seed: asyncio.Task | None = None
+
+    def _remember_search(self, mem_key: str, now: float, payload: dict[str, Any]) -> None:
+        """Store a search result in the per-process cache without unbounded growth.
+
+        Every distinct query string creates a new key and the endpoint accepts
+        anonymous callers, so an unbounded dict would let one client exhaust
+        the worker's memory. Expired entries are dropped first, then the
+        oldest live ones.
+        """
+        cache = self._search_mem_cache
+        if len(cache) >= self._search_mem_max_entries:
+            for key in [k for k, (ts, _) in cache.items() if now - ts >= _SEARCH_MEM_TTL_SECONDS]:
+                del cache[key]
+            while len(cache) >= self._search_mem_max_entries:
+                del cache[next(iter(cache))]
+        cache.pop(mem_key, None)  # re-insert last so eviction stays oldest-first
+        cache[mem_key] = (now, payload)
 
     async def _cached(self, key: str, ttl: int, loader, stale_ttl: int | None = None):
         started = time.perf_counter()
@@ -178,6 +233,272 @@ class CatalogService:
             value = await loader()
         logger.info("catalog_timing key=%s total_ms=%.1f cache=%s", key, (time.perf_counter() - started) * 1000, bool(self.cache))
         return value
+
+    async def _primary_album_cover(self, title: Any, artist_names: list[str]) -> str:
+        key = _album_title_key(title)
+        if not key:
+            return ""
+        wanted = {normalize_query(n) for n in artist_names if n}
+
+        async def load() -> str:
+            try:
+                raw = _clean(await asyncio.wait_for(self.catalog.search_albums(key, 6), timeout=2.0))
+            except Exception as exc:
+                logger.debug("primary album cover lookup failed title=%r error=%s", key, exc)
+                return ""
+            fallback = ""
+            for cand in items(raw, "album"):
+                art = _artwork_of(cand)
+                if not art or _album_title_key(cand.get("title") or cand.get("name")) != key:
+                    continue
+                if wanted and wanted & {normalize_query(n) for n in _album_artist_names(cand)}:
+                    return art
+                fallback = fallback or art
+            return fallback
+
+        try:
+            return str(await self._cached(f"music:artwork:album_cover:v1:{key}", config.TTL_ALBUM, load) or "")
+        except Exception:
+            return ""
+
+    async def _backfill_album_artwork(self, albums: list[dict[str, Any]], *, timeout: float = 1.2, limit: int = 6) -> None:
+        """Secondary-provider albums may carry only a rejected placeholder cover; take the primary provider's."""
+        missing = [a for a in albums if isinstance(a, dict) and not _artwork_of(a)][:limit]
+        if not missing:
+            return
+
+        async def fill(entry: dict[str, Any]) -> None:
+            art = await self._primary_album_cover(entry.get("title") or entry.get("name"), _album_artist_names(entry))
+            if not art:
+                return
+            _set_artwork(entry, art)
+            for track in (entry.get("tracks") or []) + (entry.get("songs") or []):
+                if isinstance(track, dict) and not _artwork_of(track):
+                    _set_artwork(track, art)
+
+        try:
+            await asyncio.wait_for(asyncio.gather(*(fill(a) for a in missing), return_exceptions=True), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.debug("album artwork backfill timed out count=%d", len(missing))
+
+    async def _song_cover_albums(
+        self,
+        songs: list[dict[str, Any]],
+        known_albums: list[dict[str, Any]] | None = None,
+        *,
+        timeout: float = 1.0,
+        limit: int = 4,
+    ) -> list[dict[str, Any]]:
+        """Album stubs carrying primary-provider covers for songs whose own album offers none."""
+        covered = {_album_title_key(a.get("title") or a.get("name")) for a in (known_albums or []) if _artwork_of(a)}
+        stubs: dict[str, dict[str, Any]] = {}
+        for s in songs:
+            if not isinstance(s, dict) or _artwork_of(s):
+                continue
+            album_val = s.get("album")
+            title = (album_val.get("title") or album_val.get("name")) if isinstance(album_val, dict) else album_val
+            key = _album_title_key(title)
+            if key and key not in covered and key not in stubs:
+                stubs[key] = {"title": str(title), "artists": [{"name": n} for n in _album_artist_names(s)]}
+            if len(stubs) >= limit:
+                break
+        if not stubs:
+            return []
+        entries = list(stubs.values())
+        await self._backfill_album_artwork(entries, timeout=timeout, limit=limit)
+        return [a for a in entries if _artwork_of(a)]
+
+    def _ensure_vocabulary_seed(self) -> None:
+        pool = getattr(self, "db_pool", None)
+        if self._vocabulary_seed is not None or not pool:
+            return
+
+        async def seed() -> None:
+            try:
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch("SELECT name FROM artists WHERE name IS NOT NULL LIMIT 5000")
+                for row in rows:
+                    self.vocabulary.add(row["name"])
+            except Exception as exc:
+                logger.debug("vocabulary seed skipped: %s", exc)
+
+        try:
+            self._vocabulary_seed = asyncio.create_task(seed())
+        except RuntimeError:
+            self._vocabulary_seed = None
+
+    def _movie_query_eligible(self, effective_query: str, parsed_query: Any) -> bool:
+        tokens = _tokens(effective_query)
+        if not tokens or len(tokens) > 3:
+            return False
+        if parsed_query and (parsed_query.filters or getattr(parsed_query, "is_exact_phrase", False)):
+            return False
+        return hasattr(self.catalog, "get_album_info") and hasattr(self.catalog, "search_albums")
+
+    @staticmethod
+    def _movie_album_for_query(
+        effective_query: str,
+        albums: list[dict[str, Any]],
+        effective_langs: list[str] | None,
+        detected_lang: str | None,
+    ) -> dict[str, Any] | None:
+        """The album a plain movie-name query most plausibly means, preferring the listener's languages."""
+        q_key = album_core_key(effective_query)
+        if not q_key:
+            return None
+        matches = [a for a in albums if isinstance(a, dict) and album_core_key(a) == q_key]
+        if not matches:
+            return None
+        preferred = {str(l).lower() for l in (effective_langs or []) if l}
+        if detected_lang:
+            preferred.add(str(detected_lang).lower())
+
+        def language_of(a: dict[str, Any]) -> str:
+            return str(a.get("language") or "").lower()
+
+        def depth(a: dict[str, Any]) -> int:
+            try:
+                return int(float(a.get("trackCount") or a.get("song_count") or a.get("track_count") or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        matches.sort(
+            key=lambda a: (
+                bool(language_of(a)) and any(p in language_of(a) or language_of(a) in p for p in preferred),
+                "soundtrack" in normalize_query(str(a.get("title") or a.get("name") or "")),
+                depth(a),
+            ),
+            reverse=True,
+        )
+        return matches[0]
+
+    async def _soundtrack_tracks(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        alb_id = str(item.get("id") or item.get("seokey") or "")
+        if not alb_id:
+            return []
+
+        async def _fetch() -> list[dict[str, Any]]:
+            details = await asyncio.wait_for(
+                self.catalog.get_album_info([alb_id], True, fetch_missing_tracks=False),
+                timeout=1.0,
+            )
+            if isinstance(details, list) and details and isinstance(details[0], dict):
+                return album(details[0]).get("songs") or []
+            return []
+
+        try:
+            tracks = await self._cached(f"music:soundtrack:{alb_id}:v2", config.TTL_ALBUM, _fetch)
+        except Exception as exc:
+            logger.debug("soundtrack expansion failed album_id=%s error=%s", alb_id, exc)
+            return []
+        language = item.get("language")
+        result = []
+        for track in tracks or []:
+            if isinstance(track, dict):
+                if language and not track.get("language"):
+                    track = {**track, "language": language}
+                result.append(track)
+        return result
+
+    async def _movie_album_probe(
+        self, effective_query: str, effective_langs: list[str] | None, detected_lang: str | None
+    ) -> dict[str, Any] | None:
+        async def load() -> list[dict[str, Any]]:
+            try:
+                raw = _clean(await asyncio.wait_for(self.catalog.search_albums(effective_query, 6), timeout=1.5))
+            except Exception as exc:
+                logger.debug("movie album probe failed query=%r error=%s", effective_query, exc)
+                return []
+            return items(raw, "album")
+
+        try:
+            albums = await self._cached(f"music:search:movie_probe:{effective_query}:v1", config.TTL_SEARCH, load)
+        except Exception:
+            return None
+        return self._movie_album_for_query(effective_query, albums or [], effective_langs, detected_lang)
+
+    @staticmethod
+    def _lead_with_album_tracks(
+        songs: list[dict[str, Any]], album_item: dict[str, Any], effective_query: str
+    ) -> list[dict[str, Any]]:
+        target_key = album_core_key(album_item) or album_core_key(effective_query)
+        target_id = str(album_item.get("id") or "")
+        target_lang = str(album_item.get("language") or "").lower()
+        lead: list[dict[str, Any]] = []
+        rest: list[dict[str, Any]] = []
+        for s in songs:
+            alb = s.get("album")
+            alb_id = str(alb.get("id") or "") if isinstance(alb, dict) else ""
+            same_album = bool(target_id and alb_id == target_id) or bool(target_key and album_core_key(alb) == target_key)
+            s_lang = str(s.get("language") or "").lower()
+            if same_album and (not target_lang or not s_lang or s_lang == target_lang):
+                lead.append(s)
+            else:
+                rest.append(s)
+        return lead + rest
+
+    async def _correct_and_retry(
+        self,
+        query: str,
+        effective_query: str,
+        parsed_query: Any,
+        kind: str | None,
+        page: int,
+        limit: int,
+        user_uid: str | None,
+    ) -> dict[str, Any] | None:
+        if parsed_query and parsed_query.filters:
+            return None
+        corrected = self.vocabulary.correct(effective_query)
+        if not corrected or normalize_query(corrected) == normalize_query(effective_query):
+            return None
+        retry = await self.search(corrected, kind, page, limit, user_uid=user_uid, _allow_correction=False)
+        if kind:
+            count = len(retry.get("items") or [])
+        else:
+            count = sum(len(retry.get(k) or []) for k in ("songs", "albums", "artists", "playlists"))
+        if count == 0:
+            return None
+        retry["corrected_query"] = corrected
+        retry["original_query"] = query
+        return retry
+
+    async def suggest(self, query: str, limit: int = 8, recent_queries: list[str] | None = None) -> list[dict[str, str]]:
+        q = " ".join((query or "").split())
+        key = normalize_query(q)
+        if not key:
+            return []
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def push(text: str, source: str) -> None:
+            k = normalize_query(text)
+            if k and k not in seen and len(out) < limit:
+                seen.add(k)
+                out.append({"text": text, "source": source})
+
+        for recent in recent_queries or []:
+            rk = normalize_query(str(recent or ""))
+            if rk and (rk.startswith(key) or (len(key) >= 3 and key in rk)):
+                push(str(recent), "recent")
+        for term in self.vocabulary.suggest(q, limit):
+            push(term, "catalog")
+        if len(out) < 3 and len(key) >= 3 and hasattr(self.catalog, "search_songs"):
+            async def load() -> list[dict[str, Any]]:
+                try:
+                    raw = _clean(await asyncio.wait_for(self.catalog.search_songs(q, 6), timeout=1.2))
+                except Exception:
+                    return []
+                return items(raw, "song")
+
+            try:
+                songs = await self._cached(f"music:suggest:{key}:v1", config.TTL_SEARCH, load)
+            except Exception:
+                songs = []
+            self.vocabulary.observe(songs or [], "song")
+            for song_item in songs or []:
+                push(str(song_item.get("title") or ""), "catalog")
+        return out
 
     async def _db_artists_for_language(self, language_id: str) -> list[dict[str, Any]]:
         pool = getattr(self, "db_pool", None)
@@ -520,17 +841,28 @@ class CatalogService:
             logger.debug("lyrics candidate search failed: %s", exc)
         return []
 
-    async def search(self, query: str, kind: str | None, page: int, limit: int, user_uid: str | None = None) -> dict[str, Any]:
+    async def search(
+        self,
+        query: str,
+        kind: str | None,
+        page: int,
+        limit: int,
+        user_uid: str | None = None,
+        *,
+        _allow_correction: bool = True,
+    ) -> dict[str, Any]:
         t_start = time.monotonic()
         provider_timed_out = False
         from api.catalog.search.parser import AdvancedQueryParser
         parsed_query = AdvancedQueryParser.parse(query)
 
-        mem_key = f"{query.strip().lower()}:{kind}:{page}:{limit}:{user_uid or 'anon'}"
+        # v2 invalidates in-process entries produced before media-context
+        # words (e.g. "movie") were removed from provider queries.
+        mem_key = f"v3:{query.strip().lower()}:{kind}:{page}:{limit}:{user_uid or 'anon'}"
         now = time.monotonic()
         if mem_key in self._search_mem_cache:
             cached_ts, cached_payload = self._search_mem_cache[mem_key]
-            if now - cached_ts < 300:
+            if now - cached_ts < _SEARCH_MEM_TTL_SECONDS:
                 return cached_payload
 
         # Concurrently load personalization signals with a tight timeout so music search never blocks on DB
@@ -579,6 +911,8 @@ class CatalogService:
             detected_lang = parsed_query.language
         effective_query = parsed_query.free_text if (parsed_query and parsed_query.free_text) else (clean_query if clean_query else normalized_query)
 
+        self._ensure_vocabulary_seed()
+        movie_album: dict[str, Any] | None = None
         if kind:
             requested = min(page * limit + 10, 100)
             if kind == "song":
@@ -622,6 +956,11 @@ class CatalogService:
                     user_languages, user_artists, history_tracks, previous_searches = None, None, None, None
                 effective_langs = [detected_lang] if detected_lang else user_languages
 
+                if self._movie_query_eligible(effective_query, parsed_query):
+                    movie_album = await self._movie_album_probe(effective_query, effective_langs, detected_lang)
+                    if movie_album:
+                        candidate_songs = list(candidate_songs or []) + await self._soundtrack_tracks(movie_album)
+
                 normalized = rank(
                     effective_query,
                     candidate_songs,
@@ -662,11 +1001,12 @@ class CatalogService:
                         combined_albums.extend(items(saavn_res, "album"))
                     if not combined_albums:
                         raise TimeoutError("album search providers returned no results")
+                    await self._backfill_album_artwork(combined_albums)
                     return combined_albums
 
                 try:
                     candidate_albums = await self._cached(
-                        f"music:search:albums_v3:{effective_query}:{requested}",
+                        f"music:search:albums_v4:{effective_query}:{requested}",
                         config.TTL_SEARCH,
                         load_albums_parallel,
                         config.STALE_CACHE_TTL,
@@ -847,10 +1187,24 @@ class CatalogService:
                         parsed_query=parsed_query,
                     )
 
+            if kind == "song" and movie_album and normalized:
+                normalized = self._lead_with_album_tracks(normalized, movie_album, effective_query)
+
+            if kind == "song" and normalized:
+                cover_albums = await self._song_cover_albums(normalized)
+                if cover_albums:
+                    normalized = _apply_album_artwork(normalized, cover_albums)
+
             logger.info(
                 "catalog_search query=%r type=%s normalized_count=%d latency_ms=%.1f",
                 query, kind, len(normalized), (time.monotonic() - t_start) * 1000,
             )
+            self.vocabulary.observe(normalized, kind)
+            if _allow_correction and not provider_timed_out and len(normalized) < 2:
+                corrected_payload = await self._correct_and_retry(query, effective_query, parsed_query, kind, page, limit, user_uid)
+                if corrected_payload:
+                    return corrected_payload
+
             start = (page - 1) * limit
             page_items = normalized[start:start + limit]
             res_payload = {
@@ -861,7 +1215,7 @@ class CatalogService:
                 "type": kind,
             }
             if not provider_timed_out:
-                self._search_mem_cache[mem_key] = (now, res_payload)
+                self._remember_search(mem_key, now, res_payload)
             return res_payload
 
         # Multi-search (all categories combined)
@@ -932,55 +1286,31 @@ class CatalogService:
 
         # Deep scan 1: Movie-name / soundtrack expansion
         # ONLY execute if songs list is sparse (< 3) OR query is an exact album title match
-        has_exact_album = any(
-            normalize_query(str(item.get("title") or item.get("name") or "")) == effective_query
-            for item in grouped.get("albums", [])
-        )
+        movie_album = self._movie_album_for_query(effective_query, grouped.get("albums", []), effective_langs, detected_lang)
         extra_songs: list[dict[str, Any]] = []
-        if (len(grouped.get("songs", [])) < 3 or has_exact_album) and hasattr(self.catalog, "get_album_info"):
-            matched_albums = [
-                item for item in grouped.get("albums", [])
-                if _strong_match(effective_query, item, "album")
-            ]
-            matched_albums.sort(
-                key=lambda item: (
-                    (item.get("language") or "").lower() == (detected_lang or "").lower(),
-                    _tokens(str(item.get("title") or item.get("name") or ""))[0] == effective_query if _tokens(str(item.get("title") or item.get("name") or "")) else False,
-                    normalize_query(str(item.get("title") or item.get("name") or "")) == effective_query,
-                    "soundtrack" in normalize_query(str(item.get("title") or item.get("name") or "")),
-                    normalize_query(str(item.get("title") or item.get("name") or "")).startswith(effective_query),
-                ),
-                reverse=True,
-            )
-            matched_albums = matched_albums[:1]
-            if matched_albums:
-                async def soundtrack_tracks(item):
-                    try:
-                        alb_id = str(item.get("id") or item.get("seokey") or "")
-                        if not alb_id:
-                            return []
-                        cache_key = f"music:soundtrack:{alb_id}:v2"
-                        async def _fetch():
-                            details = await asyncio.wait_for(
-                                self.catalog.get_album_info([alb_id], True, fetch_missing_tracks=False),
-                                timeout=1.0,
-                            )
-                            if isinstance(details, list) and details and isinstance(details[0], dict):
-                                return album(details[0]).get("songs") or []
-                            return []
-                        return await self._cached(cache_key, config.TTL_ALBUM, _fetch)
-                    except Exception as exc:
-                        err_msg = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-                        logger.debug(
-                            "search soundtrack expansion failed album_id=%s error=%s",
-                            item.get("id"), err_msg,
-                        )
-                    return []
-
-                expanded = await asyncio.gather(*(soundtrack_tracks(item) for item in matched_albums))
-                for tracks in expanded:
-                    if isinstance(tracks, list):
-                        extra_songs.extend(tracks)
+        if (len(grouped.get("songs", [])) < 3 or movie_album) and hasattr(self.catalog, "get_album_info"):
+            if movie_album:
+                matched_albums = [movie_album]
+            else:
+                matched_albums = [
+                    item for item in grouped.get("albums", [])
+                    if _strong_match(effective_query, item, "album")
+                ]
+                matched_albums.sort(
+                    key=lambda item: (
+                        (item.get("language") or "").lower() == (detected_lang or "").lower(),
+                        _tokens(str(item.get("title") or item.get("name") or ""))[0] == effective_query if _tokens(str(item.get("title") or item.get("name") or "")) else False,
+                        normalize_query(str(item.get("title") or item.get("name") or "")) == effective_query,
+                        "soundtrack" in normalize_query(str(item.get("title") or item.get("name") or "")),
+                        normalize_query(str(item.get("title") or item.get("name") or "")).startswith(effective_query),
+                    ),
+                    reverse=True,
+                )
+                matched_albums = matched_albums[:1]
+            expanded = await asyncio.gather(*(self._soundtrack_tracks(item) for item in matched_albums))
+            for tracks in expanded:
+                if isinstance(tracks, list):
+                    extra_songs.extend(tracks)
 
         # Deep scan 2: Artist top-tracks expansion when searching artist names (only if songs are sparse)
         if len(grouped.get("songs", [])) < 3 and hasattr(self.catalog, "get_top_tracks"):
@@ -1053,9 +1383,11 @@ class CatalogService:
                 parsed_query=parsed_query,
             )
 
+        await self._backfill_album_artwork(grouped.get("albums", []), timeout=1.0, limit=4)
+        cover_albums = await self._song_cover_albums(grouped.get("songs", []), grouped.get("albums", []))
         grouped["songs"] = _apply_album_artwork(
             grouped.get("songs", []),
-            grouped.get("albums", []),
+            grouped.get("albums", []) + cover_albums,
             grouped.get("artists", []),
         )
 
@@ -1063,8 +1395,11 @@ class CatalogService:
                       for key in ("artists", "songs", "albums", "playlists") for item in grouped[key]]
         top = None
         if all_ranked:
+            if movie_album:
+                top = {"type": "album", "item": movie_album, "confidence": 1.0}
+
             # If explicit entity filter was specified (e.g. artist:, album:, song:), prefer top of that kind
-            if parsed_query and parsed_query.filters:
+            if not top and parsed_query and parsed_query.filters:
                 for k in ("artist", "singer", "composer", "album", "movie", "song", "playlist"):
                     if k in parsed_query.filters:
                         target_kind = "artist" if k in ("artist", "singer", "composer") else ("album" if k in ("album", "movie") else k)
@@ -1080,28 +1415,8 @@ class CatalogService:
                 if top_confidence >= 0.50:
                     top = {"type": top_kind, "item": top_item, "confidence": round(top_confidence, 3)}
 
-        # When Top Result is an Album/Movie (e.g. "CIA" or "Ghilli"), prioritize its soundtrack songs at the top of songs list
         if top and top.get("type") == "album" and top.get("item"):
-            top_album_title = normalize_query(str(top["item"].get("title") or top["item"].get("name") or ""))
-            top_album_core = top_album_title.split(" - ")[0].strip() if " - " in top_album_title else top_album_title.split(":")[0].strip()
-            top_album_id = str(top["item"].get("id") or "")
-            album_tracks: list[dict[str, Any]] = []
-            other_tracks: list[dict[str, Any]] = []
-            for s in grouped.get("songs", []):
-                s_album_val = s.get("album")
-                s_album_title = ""
-                s_album_id = ""
-                if isinstance(s_album_val, dict):
-                    s_album_title = normalize_query(str(s_album_val.get("title") or s_album_val.get("name") or ""))
-                    s_album_id = str(s_album_val.get("id") or "")
-                elif isinstance(s_album_val, str):
-                    s_album_title = normalize_query(s_album_val)
-                s_core = s_album_title.split(" - ")[0].strip() if " - " in s_album_title else s_album_title.split(":")[0].strip()
-                if (top_album_title and (s_album_title == top_album_title or s_core == top_album_core)) or (top_album_id and s_album_id == top_album_id):
-                    album_tracks.append(s)
-                else:
-                    other_tracks.append(s)
-            grouped["songs"] = album_tracks + other_tracks
+            grouped["songs"] = self._lead_with_album_tracks(grouped.get("songs", []), top["item"], effective_query)
 
         # Spotify-style response grouping limits: Top 1, Songs 15, Albums 6, Artists 6, Playlists 6
         if "songs" in grouped:
@@ -1113,8 +1428,15 @@ class CatalogService:
         if "playlists" in grouped:
             grouped["playlists"] = grouped["playlists"][:6]
 
+        for section_kind in ("song", "album", "artist", "playlist"):
+            self.vocabulary.observe(grouped.get(f"{section_kind}s", []), section_kind)
+        if _allow_correction and sum(len(grouped.get(k, [])) for k in ("songs", "albums", "artists", "playlists")) < 2:
+            corrected_payload = await self._correct_and_retry(query, effective_query, parsed_query, kind, page, limit, user_uid)
+            if corrected_payload:
+                return corrected_payload
+
         final_payload = {"query": query, "normalized_query": normalized_query, "top_result": top, **grouped}
-        self._search_mem_cache[mem_key] = (now, final_payload)
+        self._remember_search(mem_key, now, final_payload)
         logger.info(
             "search_latency query=%r kind=%s total_ms=%.1f songs=%d albums=%d artists=%d",
             query,
@@ -1562,10 +1884,16 @@ class CatalogService:
             res = await load()
             if not res or not (res.get("tracks") or res.get("songs")):
                 return None
+            await self._backfill_album_artwork([res], timeout=2.5, limit=1)
+            cover = _artwork_of(res)
+            if cover:
+                for track in (res.get("tracks") or []) + (res.get("songs") or []):
+                    if isinstance(track, dict) and not _artwork_of(track):
+                        _set_artwork(track, cover)
             return res
 
         return await self._cached(
-            f"catalog:album:{album_id}:tracks-v3",
+            f"catalog:album:{album_id}:tracks-v4",
             getattr(config, "TTL_ALBUM", 21600),
             load_with_guard,
             getattr(config, "STALE_CACHE_TTL", 3600),

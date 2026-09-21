@@ -231,13 +231,17 @@ class AdvancedQueryParser:
                     cleaned_text = re.sub(rf"\b{re.escape(m)}\b", " ", cleaned_text, flags=re.IGNORECASE).strip()
                     break
 
-        # Strip remaining language connector words if language/genre/era was matched
-        free_tokens = []
-        for tok in cleaned_text.split():
-            clean_tok = re.sub(r"[^\w]", "", tok.lower())
-            if (detected_language or year_range or detected_genre) and clean_tok in LANGUAGE_CONNECTORS:
-                continue
-            free_tokens.append(tok)
+        # Media-context words ("movie", "soundtrack", "songs", etc.) are
+        # instructions about what the user wants, not title terms.  Remove
+        # them whenever another meaningful title term exists, even without a
+        # language qualifier.  Keep a connector-only query unchanged so it is
+        # still searchable instead of becoming blank.
+        raw_tokens = cleaned_text.split()
+        meaningful_tokens = [
+            tok for tok in raw_tokens
+            if re.sub(r"[^\w]", "", tok.lower()) not in LANGUAGE_CONNECTORS
+        ]
+        free_tokens = meaningful_tokens or raw_tokens
         free_text = " ".join(free_tokens).strip()
         if not free_text and (detected_language or filters or year_range or detected_genre):
             free_text = raw

@@ -9,6 +9,16 @@ def encoded_query(value: str) -> str:
     return quote(value.strip(), safe="")
 
 
+def encoded_id(value: Any) -> str:
+    """Percent-encode a catalogue identifier before appending it to a provider URL.
+
+    Identifiers arrive from URL path parameters and user-saved records, so
+    characters such as ``&``, ``#`` or ``?`` would otherwise rewrite the
+    upstream query string.
+    """
+    return quote(str(value or "").strip(), safe="")
+
+
 def search_entries(payload: Any) -> list[dict[str, Any]]:
     """Extract search cards from both Gaana's legacy and newer envelopes."""
     found: list[dict[str, Any]] = []

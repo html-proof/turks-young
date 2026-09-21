@@ -467,9 +467,9 @@ class UserAudioSettings(BaseModel):
 
 class UserAudioSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    wifi_stream_quality: int | None = Field(default=None, ge=24, le=320)
-    mobile_stream_quality: int | None = Field(default=None, ge=24, le=320)
-    download_quality: int | None = Field(default=None, ge=24, le=320)
+    wifi_stream_quality: int | None = Field(default=None, ge=24, le=360)
+    mobile_stream_quality: int | None = Field(default=None, ge=24, le=360)
+    download_quality: int | None = Field(default=None, ge=24, le=360)
     automatic_quality_enabled: bool | None = None
     data_saver_enabled: bool | None = None
     wifi_only_downloads: bool | None = None

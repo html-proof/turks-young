@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from api.catalog.normalize import album, artist, clean_album_or_title, song
-from api.catalog.service import CatalogService, LanguageCatalog, _apply_album_artwork
+from api.catalog.service import CatalogService, LanguageCatalog, _album_title_key, _apply_album_artwork
 from api.cache.redis_cache import RedisCache
 from api.catalog.search.ranking import rank
 from api.provider_search import encoded_query, search_entries
@@ -768,6 +768,14 @@ def test_parse_query_language_and_core_and_cia_ranking():
     assert clean2 == "premam"
     assert lang2 == "malayalam"
 
+    # Media context must not pollute title matching or provider searches.
+    movie_core, movie_lang = parse_query_language_and_core("Pyaar Yatra movie")
+    assert movie_core == "pyaar yatra"
+    assert movie_lang is None
+
+    from api.catalog.search.parser import AdvancedQueryParser
+    assert AdvancedQueryParser.parse("Tamil movie Sanka").free_text == "Sanka"
+
     cia_album = {
         "id": "alb_cia",
         "title": "CIA - Comrade In America",
@@ -808,3 +816,76 @@ async def test_redis_cache_eval_loader_handles_sync_and_async_loaders():
     res3 = await RedisCache._eval_loader(raw_val)
     assert res3 == {"items": []}
 
+
+def test_album_title_key_ignores_soundtrack_boilerplate():
+    assert _album_title_key("Annan Thampi (Original Motion Picture Soundtrack)") == _album_title_key("Annan Thampi")
+    assert _album_title_key("Sarkar [OST]") == _album_title_key("Sarkar")
+    assert _album_title_key("") == ""
+
+
+@pytest.mark.asyncio
+async def test_album_details_backfills_secondary_provider_cover_from_primary(monkeypatch):
+    import api.stream_fallback as stream_fallback
+
+    class FakeResolver:
+        async def get_album_details(self, album_id):
+            return {
+                "id": "saavn:xmnh", "seokey": "saavn-album-xmnh",
+                "title": "Annan Thampi", "name": "Annan Thampi", "artist": "Rahul Raj",
+                "image_url": None, "artworkUrl": None,
+                "songs": [{
+                    "id": "saavn:1", "seokey": "saavn-1", "title": "Kanmaniye",
+                    "artist": "Rahul Raj", "album": "Annan Thampi", "image_url": None,
+                }],
+            }
+
+    monkeypatch.setattr(stream_fallback, "get_stream_fallback_resolver", lambda: FakeResolver())
+    catalog = FakeCatalog()
+    catalog.search_albums = AsyncMock(return_value=[{
+        "seokey": "annan-thampi-original-motion-picture-soundtrack", "album_id": "77",
+        "title": "Annan Thampi (Original Motion Picture Soundtrack)",
+        "artists": "Jassie Gift, Rahul Raj",
+        "images": {"urls": {"large_artwork": "https://a10.gaanacdn.com/annan/size_l.jpg"}},
+    }])
+    service = CatalogService(catalog, configured_languages())
+
+    result = await service.album_details("saavn-xmnh")
+
+    assert result["image_url"] == "https://a10.gaanacdn.com/annan/size_l.jpg"
+    assert result["artworkUrl"] == "https://a10.gaanacdn.com/annan/size_l.jpg"
+    assert result["tracks"][0]["image_url"] == "https://a10.gaanacdn.com/annan/size_l.jpg"
+    assert catalog.search_albums.await_args.args[0] == "annan thampi"
+
+
+@pytest.mark.asyncio
+async def test_album_search_backfills_missing_cover_from_primary_provider():
+    catalog = FakeCatalog()
+    catalog.search_albums = AsyncMock(side_effect=[
+        [{"seokey": "album-one", "album_id": "20", "title": "Album One", "artists": "Artist One"}],
+        [{
+            "seokey": "album-one-ost", "album_id": "21",
+            "title": "Album One (Original Motion Picture Soundtrack)", "artists": "Artist One",
+            "images": {"urls": {"large_artwork": "https://images.test/album-one.jpg"}},
+        }],
+    ])
+    service = CatalogService(catalog, configured_languages())
+
+    result = await service.search("Album One", "album", 1, 10)
+
+    assert result["items"][0]["id"] == "album-one"
+    assert result["items"][0]["image_url"] == "https://images.test/album-one.jpg"
+
+
+@pytest.mark.asyncio
+async def test_song_search_backfills_cover_from_primary_album_when_song_has_none():
+    catalog = FakeCatalog()
+    catalog.search_albums = AsyncMock(return_value=[{
+        "seokey": "album-one", "album_id": "20", "title": "Album One", "artists": "Artist One",
+        "images": {"urls": {"large_artwork": "https://images.test/album-one.jpg"}},
+    }])
+    service = CatalogService(catalog, configured_languages())
+
+    result = await service.search("Song One", "song", 1, 10)
+
+    assert result["items"][0]["id"] == "song-one"
+    assert result["items"][0]["image_url"] == "https://images.test/album-one.jpg"

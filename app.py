@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import hmac
 import logging.config
 import os
 import re
@@ -91,10 +92,28 @@ _RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
 _RATE_LIMIT_MAX_BUCKETS = 10_000
 
 
+_PROXY_SHARED_SECRET = os.getenv("PROXY_SHARED_SECRET", "")
+
+
 def _rate_limit_key(request: Request) -> str:
-    forwarded = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For")
+    """Identify the caller without trusting headers any client can forge.
+
+    ``CF-Connecting-IP`` is honoured only when the request carries the shared
+    secret that our own Cloudflare Worker attaches; otherwise anyone reaching
+    the Render origin directly could choose a fresh key per request and bypass
+    the limit entirely. ``X-Forwarded-For`` is read from its *last* entry: the
+    platform proxy appends the address it actually saw, while the first entry
+    is whatever the client decided to send.
+    """
+    if _PROXY_SHARED_SECRET:
+        presented = request.headers.get("X-Proxy-Secret", "")
+        if presented and hmac.compare_digest(presented, _PROXY_SHARED_SECRET):
+            edge_ip = request.headers.get("CF-Connecting-IP")
+            if edge_ip:
+                return edge_ip.strip()[:128]
+    forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-        return forwarded.split(",", 1)[0].strip()[:128]
+        return forwarded.rsplit(",", 1)[-1].strip()[:128]
     return (request.client.host if request.client else "unknown")[:128]
 
 

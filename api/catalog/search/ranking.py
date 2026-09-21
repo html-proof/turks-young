@@ -7,6 +7,12 @@ import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
+try:
+    from rapidfuzz import fuzz as _rf_fuzz
+    from rapidfuzz.distance import DamerauLevenshtein as _rf_damerau
+except ImportError:  # pragma: no cover - optional accelerator
+    _rf_fuzz = _rf_damerau = None
+
 logger = logging.getLogger(__name__)
 
 _PUNCTUATION = re.compile(r"[^\w\s]", re.UNICODE)
@@ -37,11 +43,15 @@ def parse_query_language_and_core(raw_query: str) -> tuple[str, str | None]:
         else:
             remaining_tokens.append(token)
 
-    core_tokens = []
-    for token in remaining_tokens:
-        if detected_lang and token in LANGUAGE_CONNECTORS:
-            continue
-        core_tokens.append(token)
+    # Words such as "movie", "soundtrack", and "songs" describe the
+    # requested result type, not the title to send to a provider.  Previously
+    # they were removed only when the query also named a language.  That made
+    # searches like "Pyaar Yatra movie" turn into broad, inaccurate provider
+    # queries instead of the intended title, "Pyaar Yatra".
+    meaningful_tokens = [
+        token for token in remaining_tokens if token not in LANGUAGE_CONNECTORS
+    ]
+    core_tokens = meaningful_tokens or remaining_tokens
 
     clean_q = " ".join(core_tokens).strip()
     return (clean_q if clean_q else norm, detected_lang)
@@ -177,6 +187,8 @@ def _shares_artist(item1: dict[str, Any], item2: dict[str, Any]) -> bool:
 
 
 def _levenshtein(s1: str, s2: str) -> int:
+    if _rf_damerau is not None:
+        return _rf_damerau.distance(s1, s2)
     if len(s1) < len(s2):
         return _levenshtein(s2, s1)
     if len(s2) == 0:
@@ -239,10 +251,53 @@ def _is_typo_match(query: str, target: str) -> bool:
 def _similarity(query: str, value: str) -> float:
     if not value:
         return 0.0
+    if _rf_fuzz is not None:
+        q, v = normalize_query(query), normalize_query(value)
+        if not q or not v:
+            return 0.0
+        return max(_rf_fuzz.WRatio(q, v), _rf_fuzz.token_sort_ratio(q, v)) / 100.0
     q_tokens, v_tokens = _tokens(query), _tokens(value)
     whole = SequenceMatcher(None, query, normalize_query(value)).ratio()
     token = sum(max(SequenceMatcher(None, token, candidate).ratio() for candidate in v_tokens) for token in q_tokens) if v_tokens else 0.0
     return max(whole, token / len(q_tokens) if q_tokens else 0.0)
+
+
+def _is_fuzzy_match(query: str, target: str) -> bool:
+    """Order-insensitive fuzzy match for queries long enough to carry intent."""
+    q = normalize_query(query)
+    t = normalize_query(target)
+    if len(q) < 5 or not t:
+        return False
+    if _rf_fuzz is None:
+        return _similarity(q, t) >= 0.9
+    if len(q.split()) > 1 and _rf_fuzz.token_sort_ratio(q, t) >= 88:
+        return True
+    return len(q) >= 6 and _rf_fuzz.partial_ratio(q, t) >= 93 and _rf_fuzz.ratio(q, t) >= 60
+
+
+_PARENTHETICAL = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+_SUBTITLE_SPLIT = re.compile(r"\s+[-:\u2013|]\s+")
+_ALBUM_TRAILERS = {"version", "deluxe", "edition", "original"}
+
+
+def album_core_key(value: Any) -> str:
+    """Movie/album identity without language tags, OST boilerplate or subtitles.
+
+    'Sarkar (Tamil) (Original Motion Picture Soundtrack)' and 'Sarkar' share a key;
+    'Sarkar 3' and 'Sarkar Raj' do not.
+    """
+    if isinstance(value, dict):
+        value = value.get("title") or value.get("name") or ""
+    raw = " ".join(str(value or "").split())
+    if not raw:
+        return ""
+    text = _PARENTHETICAL.sub(" ", raw)
+    text = _SUBTITLE_SPLIT.split(text)[0] or text
+    norm = _OST_KEYWORDS.sub(" ", normalize_query(text))
+    tokens = norm.split()
+    while len(tokens) > 1 and (tokens[-1] in KNOWN_LANGUAGES or tokens[-1] in _ALBUM_TRAILERS):
+        tokens.pop()
+    return " ".join(tokens)
 
 
 def _matched_query_tokens(query_tokens: list[str], value: str) -> set[str]:
@@ -363,6 +418,10 @@ def score_item(
             tier = RankingTier.TIER_B
             total_score += 150 + 240 + 110  # = 500
             reasons.append("typo_corrected_match +500")
+        elif _is_fuzzy_match(clean_q, norm_title):
+            tier = RankingTier.TIER_B
+            total_score += 480
+            reasons.append("fuzzy_token_match +480")
         else:
             sim = _similarity(clean_q, norm_title)
             score_part = int(sim * 100)
@@ -375,6 +434,7 @@ def score_item(
             or (clean_album and clean_album == clean_q)
             or (raw_title_core != title and norm_title_core == clean_q)
             or (clean_album and raw_album_core != album_name and norm_album_core == clean_q)
+            or album_core_key(title) == clean_q
         )
         if is_exact_album:
             tier = RankingTier.TIER_A
@@ -412,6 +472,10 @@ def score_item(
             tier = RankingTier.TIER_C
             total_score += 350
             reasons.append("album_artist_contains_query +350")
+        elif _is_fuzzy_match(clean_q, norm_title) or (clean_album and _is_fuzzy_match(clean_q, clean_album)):
+            tier = RankingTier.TIER_B
+            total_score += 380
+            reasons.append("fuzzy_token_match +380")
         else:
             sim = _similarity(clean_q, norm_title)
             score_part = int(sim * 100)
@@ -434,6 +498,14 @@ def score_item(
         is_exact_album = (
             (clean_album and clean_album == clean_q)
             or (clean_album and raw_album_core != album_name and norm_album_core == clean_q)
+            or (bool(album_name) and album_core_key(album_name) == clean_q)
+        )
+        # A soundtrack whose film is named exactly like the query, in a language the
+        # listener asked for or prefers, carries the query's intent as much as a
+        # same-named single does.
+        preferred_langs = [detected_lang] if detected_lang else list(user_languages or [])
+        album_in_preferred_language = bool(item_lang) and any(
+            l and (str(l).lower() in item_lang or item_lang in str(l).lower()) for l in preferred_langs
         )
 
         if is_complete_combined:
@@ -444,6 +516,10 @@ def score_item(
             tier = RankingTier.TIER_A
             total_score += 1000  # Exact title match
             reasons.append("exact_normalized_title +1000")
+        elif is_exact_album and album_in_preferred_language:
+            tier = RankingTier.TIER_A
+            total_score += 1000
+            reasons.append("exact_album_movie_preferred_language +1000")
         elif is_exact_album:
             tier = RankingTier.TIER_A
             total_score += 950   # Exact album / soundtrack match
@@ -484,19 +560,38 @@ def score_item(
             tier = RankingTier.TIER_B
             total_score += 320
             reasons.append("typo_corrected_match +320")
+        elif len(core_tokens) == 1 and _is_fuzzy_match(clean_q, norm_title):
+            tier = RankingTier.TIER_B
+            total_score += 300
+            reasons.append("fuzzy_token_match +300")
         elif len(core_tokens) > 1:
             combined = set(_tokens(f"{norm_title} {norm_artists} {clean_album}"))
             matched = set(core_tokens) & combined
+            typo_matched = {
+                tok for tok in core_tokens
+                if tok not in matched and len(tok) >= 4 and any(
+                    c.startswith(tok) or _levenshtein(tok, c) <= (1 if len(tok) <= 6 else 2)
+                    for c in combined if len(c) >= 3
+                )
+            }
             if len(matched) == len(core_tokens):
                 tier = RankingTier.TIER_B
                 total_score += 580
                 reasons.append("all_query_words_present +580")
+            elif typo_matched and len(matched | typo_matched) == len(core_tokens):
+                tier = RankingTier.TIER_B
+                total_score += 540
+                reasons.append("all_query_words_typo_tolerant +540")
             elif len(matched) > 0:
                 tier = RankingTier.TIER_C
                 ratio = len(matched) / len(core_tokens)
                 part = int(200 + ratio * 250)
                 total_score += part
                 reasons.append(f"multi_field_partial +{part}")
+            elif _is_fuzzy_match(clean_q, norm_title) or _is_fuzzy_match(clean_q, f"{norm_title} {norm_artists}"):
+                tier = RankingTier.TIER_B
+                total_score += 300
+                reasons.append("fuzzy_token_match +300")
             else:
                 sim = _similarity(clean_q, norm_title)
                 score_part = int(sim * 100)
@@ -671,6 +766,15 @@ def score_item(
         except (TypeError, ValueError):
             pass
 
+    if kind == "album":
+        try:
+            depth = int(float(item.get("trackCount") or item.get("song_count") or item.get("track_count") or 0))
+        except (TypeError, ValueError):
+            depth = 0
+        if depth > 1:
+            total_score += min(depth, 8)
+            reasons.append(f"album_depth +{min(depth, 8)}")
+
     # Official Record Label Boost (+25) as secondary authenticity signal
     label = str(item.get("label") or "").strip()
     is_official = bool(item.get("official_label_verified")) or is_verified_label(label)
@@ -761,6 +865,7 @@ def _strong_match(query: str, item: dict[str, Any], kind: str) -> bool:
             or q in normalized
             or _is_phonetic_match(q, normalized)
             or _is_typo_match(q, normalized)
+            or _is_fuzzy_match(q, normalized)
         ):
             return True
         if len(q_tokens) > 1 and all(
@@ -1046,28 +1151,26 @@ def rank(
     # When kind is song and exact recording identities exist (exact title, exact album, or complete combined),
     # prioritize exact title recordings and matching soundtrack tracks while suppressing unrelated broad matches
     if kind == "song":
+        def _album_key(entry: dict[str, Any]) -> str:
+            return album_core_key(_text(entry, kind)[2])
+
         exact_title_or_album_recordings = [
             item for item in ranked
             if (
                 normalize_query(str(item[3].get("title") or item[3].get("name") or "")) == q_norm
-                or _OST_KEYWORDS.sub("", normalize_query(str(item[3].get("album") or ""))).strip() == q_norm
-                or (item[3].get("album") and _OST_KEYWORDS.sub("", normalize_query(str(item[3].get("album") or ""))).strip().split(" - ")[0].strip() == q_norm)
+                or _album_key(item[3]) == q_norm
                 or (
                     len(q_tokens) > 1
                     and _matched_query_tokens(q_tokens, normalize_query(str(item[3].get("title") or "")))
-                    and _matched_query_tokens(q_tokens, normalize_query(str(item[3].get("artists") or "")))
-                    and len(_matched_query_tokens(q_tokens, normalize_query(str(item[3].get("title") or ""))) | _matched_query_tokens(q_tokens, normalize_query(str(item[3].get("artists") or "")))) == len(set(q_tokens))
+                    and _matched_query_tokens(q_tokens, _text(item[3], kind)[1])
+                    and len(_matched_query_tokens(q_tokens, normalize_query(str(item[3].get("title") or ""))) | _matched_query_tokens(q_tokens, _text(item[3], kind)[1])) == len(set(q_tokens))
                 )
             )
         ]
         if exact_title_or_album_recordings:
             ranked = [
                 item for item in ranked
-                if (
-                    item in exact_title_or_album_recordings
-                    or _OST_KEYWORDS.sub("", normalize_query(str(item[3].get("album") or ""))).strip() == q_norm
-                    or (item[3].get("album") and _OST_KEYWORDS.sub("", normalize_query(str(item[3].get("album") or ""))).strip().split(" - ")[0].strip() == q_norm)
-                )
+                if (item in exact_title_or_album_recordings or _album_key(item[3]) == q_norm)
                 and not _UNOFFICIAL_NOISE.search(str(item[3].get("title") or ""))
             ]
 
