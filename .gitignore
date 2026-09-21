@@ -13,6 +13,7 @@ build/
 .mypy_cache/
 .ruff_cache/
 node_modules/
+.wrangler/
 
 # Secrets — never commit these
 service_account.json

@@ -101,6 +101,11 @@ export default {
     for (const name of HOP_BY_HOP) headers.delete(name);
     headers.set("X-Forwarded-Host", url.host);
     headers.set("X-Forwarded-Proto", "https");
+    // Lets the origin trust CF-Connecting-IP for rate limiting. Configure with
+    // `wrangler secret put PROXY_SHARED_SECRET` and mirror the same value as
+    // PROXY_SHARED_SECRET on the backend. A client-supplied header is dropped.
+    headers.delete("X-Proxy-Secret");
+    if (env.PROXY_SHARED_SECRET) headers.set("X-Proxy-Secret", env.PROXY_SHARED_SECRET);
     const upstreamRequest = new Request(upstreamUrl, {
       method: request.method,
       headers,
