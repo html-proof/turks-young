@@ -856,9 +856,9 @@ class CatalogService:
         from api.catalog.search.parser import AdvancedQueryParser
         parsed_query = AdvancedQueryParser.parse(query)
 
-        # v2 invalidates in-process entries produced before media-context
-        # words (e.g. "movie") were removed from provider queries.
-        mem_key = f"v3:{query.strip().lower()}:{kind}:{page}:{limit}:{user_uid or 'anon'}"
+        # v4 invalidates in-process entries that may hold provider-timeout
+        # empties produced before empty outcomes were kept out of the caches.
+        mem_key = f"v4:{query.strip().lower()}:{kind}:{page}:{limit}:{user_uid or 'anon'}"
         now = time.monotonic()
         if mem_key in self._search_mem_cache:
             cached_ts, cached_payload = self._search_mem_cache[mem_key]
@@ -918,21 +918,28 @@ class CatalogService:
             if kind == "song":
                 async def load_songs_parallel():
                     try:
-                        gaana_res = _clean(await asyncio.wait_for(methods["song"](effective_query, requested), timeout=2.2))
+                        gaana_res = _clean(await asyncio.wait_for(methods["song"](effective_query, requested), timeout=config.SEARCH_PROVIDER_TIMEOUT))
                     except Exception as exc:
                         logger.debug("Gaana song search failed: %s", exc)
-                        gaana_res = []
+                        # A provider failure is not a negative result. Raising
+                        # keeps the empty outcome out of the shared cache.
+                        raise TimeoutError("song search provider unavailable") from exc
                     combined_songs = []
                     if gaana_res:
                         combined_songs.extend(items(gaana_res, "song"))
                     return combined_songs
 
-                candidate_songs = await self._cached(
-                    f"music:search:songs_v2:{effective_query}:{requested}",
-                    config.TTL_SEARCH,
-                    load_songs_parallel,
-                    config.STALE_CACHE_TTL,
-                )
+                try:
+                    candidate_songs = await self._cached(
+                        f"music:search:songs_v3:{effective_query}:{requested}",
+                        config.TTL_SEARCH,
+                        load_songs_parallel,
+                        config.STALE_CACHE_TTL,
+                    )
+                except TimeoutError:
+                    logger.warning("catalog search provider timeout kind=%s", kind)
+                    provider_timed_out = True
+                    candidate_songs = []
                 try:
                     user_languages, user_artists, history_tracks, previous_searches = await asyncio.wait_for(personalization_task, timeout=0.08)
                 except Exception:
@@ -958,7 +965,7 @@ class CatalogService:
             elif kind == "album":
                 async def load_albums_parallel():
                     try:
-                        gaana_res = _clean(await asyncio.wait_for(methods["album"](effective_query, requested), timeout=2.2))
+                        gaana_res = _clean(await asyncio.wait_for(methods["album"](effective_query, requested), timeout=config.SEARCH_PROVIDER_TIMEOUT))
                     except Exception as exc:
                         logger.debug("Gaana album search failed: %s", exc)
                         gaana_res = []
@@ -972,7 +979,7 @@ class CatalogService:
 
                 try:
                     candidate_albums = await self._cached(
-                        f"music:search:albums_v4:{effective_query}:{requested}",
+                        f"music:search:albums_v5:{effective_query}:{requested}",
                         config.TTL_SEARCH,
                         load_albums_parallel,
                         config.STALE_CACHE_TTL,
@@ -1000,9 +1007,14 @@ class CatalogService:
                 )
             else:
                 async def load():
-                    return _clean(await asyncio.wait_for(methods[kind](effective_query, requested), timeout=2.2))
+                    result = _clean(await asyncio.wait_for(methods[kind](effective_query, requested), timeout=config.SEARCH_PROVIDER_TIMEOUT))
+                    if not result:
+                        # Keep empty provider outcomes out of the shared cache so a
+                        # transient outage cannot pin "no results" for the TTL.
+                        raise TimeoutError(f"{kind} search provider returned no results")
+                    return result
                 try:
-                    result = await self._cached(f"music:search:{kind}:{effective_query}:{requested}:v12", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
+                    result = await self._cached(f"music:search:{kind}:{effective_query}:{requested}:v13", config.TTL_SEARCH, load, config.STALE_CACHE_TTL)
                 except TimeoutError:
                     # Keep timeout responses outside the cache so a transient
                     # provider outage does not hide later successful results.
@@ -1189,24 +1201,32 @@ class CatalogService:
         async def load_all():
             async def safe_search(m):
                 try:
-                    return await asyncio.wait_for(m(effective_query, preview), timeout=2.2)
+                    return await asyncio.wait_for(m(effective_query, preview), timeout=config.SEARCH_PROVIDER_TIMEOUT)
                 except Exception as exc:
                     logger.debug("Provider search method failed: %s", exc)
                     return exc
 
             tasks = [safe_search(method) for method in methods.values()]
             res = await asyncio.gather(*tasks, return_exceptions=True)
-            # A provider outage is not a successful negative search. Let the
-            # request fail (and the client retry) rather than caching no matches.
-            if any(isinstance(r, Exception) for r in res) and not any(
-                isinstance(r, list) and r for r in res
-            ):
-                raise TimeoutError("Search providers unavailable; please retry")
-            return [
+            # A provider outage is not a successful negative search, and an
+            # all-empty response (timeouts, circuit breaker, upstream "no
+            # results" envelopes) must never be cached: it would pin "no
+            # results" for this query for the whole TTL. Raise instead so the
+            # caller serves an uncached empty page and the next request
+            # retries the providers.
+            converted = [
                 [] if isinstance(r, Exception) or (isinstance(r, dict) and "error" in r) else r
                 for r in res
             ]
-        results = await self._cached(f"music:search:all:{effective_query}:{preview}:v15", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+            if not any(isinstance(r, list) and r for r in converted):
+                raise TimeoutError("Search providers unavailable; please retry")
+            return converted
+        try:
+            results = await self._cached(f"music:search:all:{effective_query}:{preview}:v16", config.TTL_SEARCH, load_all, config.STALE_CACHE_TTL)
+        except TimeoutError:
+            logger.warning("catalog search provider timeout kind=multi query=%r", query)
+            provider_timed_out = True
+            results = [[], [], [], []]
 
         try:
             user_languages, user_artists, history_tracks, previous_searches = await asyncio.wait_for(personalization_task, timeout=0.08)
@@ -1380,13 +1400,14 @@ class CatalogService:
 
         for section_kind in ("song", "album", "artist", "playlist"):
             self.vocabulary.observe(grouped.get(f"{section_kind}s", []), section_kind)
-        if _allow_correction and sum(len(grouped.get(k, [])) for k in ("songs", "albums", "artists", "playlists")) < 2:
+        if _allow_correction and not provider_timed_out and sum(len(grouped.get(k, [])) for k in ("songs", "albums", "artists", "playlists")) < 2:
             corrected_payload = await self._correct_and_retry(query, effective_query, parsed_query, kind, page, limit, user_uid)
             if corrected_payload:
                 return corrected_payload
 
         final_payload = {"query": query, "normalized_query": normalized_query, "top_result": top, **grouped}
-        self._remember_search(mem_key, now, final_payload)
+        if not provider_timed_out:
+            self._remember_search(mem_key, now, final_payload)
         logger.info(
             "search_latency query=%r kind=%s total_ms=%.1f songs=%d albums=%d artists=%d",
             query,

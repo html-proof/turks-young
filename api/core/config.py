@@ -27,6 +27,11 @@ UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
 
 UPSTREAM_TIMEOUT = float(os.getenv("UPSTREAM_TIMEOUT", "5"))
 UPSTREAM_MAX_RETRIES = int(os.getenv("UPSTREAM_MAX_RETRIES", "2"))
+# Budget for one catalog search provider call, including the songDetail
+# fan-out inside search_songs. A cold search takes 2-3s even on a good
+# link, so anything under ~4s times out routinely and poisons the search
+# cache with empty results.
+SEARCH_PROVIDER_TIMEOUT = float(os.getenv("SEARCH_PROVIDER_TIMEOUT", "6"))
 
 RETRY_DELAYS = [0.2, 0.5]
 

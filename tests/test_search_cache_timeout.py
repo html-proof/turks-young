@@ -33,6 +33,9 @@ async def test_multi_search_outage_is_not_cached_as_no_results():
         setattr(catalog, name, AsyncMock(side_effect=TimeoutError()))
     service = CatalogService(catalog, LanguageCatalog([]), RedisCache('', ''))
     for _ in range(2):
-        with pytest.raises(TimeoutError, match='Search providers unavailable'):
-            await service.search('Mudhalvan', None, 1, 15)
+        result = await service.search('Mudhalvan', None, 1, 15)
+        assert result['songs'] == []
+        assert result['albums'] == []
+    # Empty outage pages must not be cached or memoized: the second request
+    # has to reach the provider again.
     assert catalog.search_songs.await_count == 2
