@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     cursor_secret: SecretStr = SecretStr("development-only-change-me")
     rate_limit_requests: int = 120
     rate_limit_window_seconds: int = 60
+    # Shared with the Cloudflare CDN worker (wrangler secret PROXY_SHARED_SECRET).
+    # Only requests presenting it in X-Proxy-Secret may use CF-Connecting-IP as
+    # their rate-limit identity; everyone else is keyed by the address the
+    # platform proxy appended to X-Forwarded-For.
+    proxy_shared_secret: SecretStr | None = None
 
     # Search responses are cached only long enough to absorb keystrokes;
     # SearchService clamps this to 30-60 seconds.
@@ -103,9 +108,9 @@ class Settings(BaseSettings):
     def empty_credentials_path_is_none(cls, value):
         return None if value in (None, "") else value
 
-    @field_validator("firebase_credentials_json", mode="before")
+    @field_validator("firebase_credentials_json", "proxy_shared_secret", mode="before")
     @classmethod
-    def empty_credentials_json_is_none(cls, value):
+    def empty_secret_is_none(cls, value):
         if value is None:
             return None
         text = str(value).strip()

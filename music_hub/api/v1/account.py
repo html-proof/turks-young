@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Depends, Response, status
 
 from music_hub.container import Container
@@ -5,6 +7,13 @@ from music_hub.dependencies import AuthenticatedUser, get_container, require_use
 
 
 router = APIRouter(prefix="/account", tags=["account"])
+
+_GLOB_META = re.compile(r"([\\*?\[\]])")
+
+
+def _glob_escape(value: str) -> str:
+    """Escape Redis glob metacharacters so a user id can only match its own keys."""
+    return _GLOB_META.sub(r"\\\1", value)
 
 
 @router.delete(
@@ -20,5 +29,5 @@ async def delete_account(
     # chooses which account is deleted.
     await container.firebase.delete_user(current.identity.uid)
     await container.users_repository.delete(current.id)
-    await container.cache.delete_pattern(f"*:{current.id}*")
+    await container.cache.delete_pattern(f"*:{_glob_escape(current.id)}*")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

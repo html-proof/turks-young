@@ -263,7 +263,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             firebase_status = container.firebase.check()
         except Exception as exc:
-            firebase_status = f"unavailable: {exc}"
+            # The detail can name credential paths; keep it in the logs only.
+            logger.error("Firebase readiness check failed: %s", exc)
+            firebase_status = "unavailable"
         ready = database_ready
         payload = {
             "status": "ready" if ready else "not_ready",
@@ -295,7 +297,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.exception_handler(InfrastructureUnavailable)
     async def infrastructure_handler(request: Request, exc: InfrastructureUnavailable):
         logger.error("Infrastructure unavailable on %s: %s", request.url.path, exc)
-        return JSONResponse(status_code=503, content=_error("service_unavailable", str(exc)))
+        # Messages describe credentials, file paths and hostnames; never echo them.
+        return JSONResponse(
+            status_code=503,
+            content=_error("service_unavailable", "A required backend service is unavailable"),
+        )
 
     @application.exception_handler(InvalidCursor)
     async def cursor_handler(_: Request, exc: InvalidCursor):

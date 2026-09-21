@@ -2,6 +2,10 @@ import { cacheDecision } from "./cache-policy";
 
 type CacheStatus = "HIT" | "MISS" | "BYPASS";
 
+// PROXY_SHARED_SECRET is a Wrangler secret, so it is absent from the generated
+// Env type and from local development unless `wrangler secret put` was run.
+type CdnEnv = Env & { PROXY_SHARED_SECRET?: string };
+
 function canStore(response: Response): boolean {
   if (response.status !== 200 || response.headers.has("set-cookie")) {
     return false;
@@ -41,7 +45,7 @@ function withCdnHeaders(
   });
 }
 
-function originRequest(request: Request, originValue: string): Request {
+function originRequest(request: Request, originValue: string, proxySecret?: string): Request {
   const incomingUrl = new URL(request.url);
   const origin = new URL(originValue);
   if (origin.protocol !== "https:") {
@@ -53,6 +57,13 @@ function originRequest(request: Request, originValue: string): Request {
   headers.set("x-forwarded-host", incomingUrl.host);
   headers.set("x-forwarded-proto", "https");
   headers.set("x-music-hub-cdn", "cloudflare");
+  // Lets the origin trust cf-connecting-ip for rate limiting. Mirror the same
+  // value as PROXY_SHARED_SECRET on the backend. A client-supplied header is
+  // always dropped so nobody can claim the edge's identity.
+  headers.delete("x-proxy-secret");
+  if (proxySecret) {
+    headers.set("x-proxy-secret", proxySecret);
+  }
   if (!headers.has("x-request-id")) {
     headers.set("x-request-id", crypto.randomUUID());
   }
@@ -64,8 +75,8 @@ function originRequest(request: Request, originValue: string): Request {
   });
 }
 
-async function fetchOrigin(request: Request, env: Env): Promise<Response> {
-  return fetch(originRequest(request, env.ORIGIN_URL));
+async function fetchOrigin(request: Request, env: CdnEnv): Promise<Response> {
+  return fetch(originRequest(request, env.ORIGIN_URL, env.PROXY_SHARED_SECRET));
 }
 
 export default {
@@ -114,4 +125,4 @@ export default {
       );
     }
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<CdnEnv>;
