@@ -16,6 +16,7 @@ const TTL_RULES = [
   [/^\/api\/albums(?:\/|$)/, 3600],
   [/^\/api\/albums\/[^\/]+/, 21600],
   [/^\/(songs|artists|albums|playlists)\/search\//, 900],
+  [/^\/api\/search(?:\/|$)/, 300],
   [/^\/playlists\/info\//, 3600],
   [/^\/songs\/info\//, 1800],
   [/^\/(albums|artists)\/info\//, 21600],
@@ -129,6 +130,26 @@ export default {
           status: response.status,
           headers,
         });
+      }
+
+      // Never edge-cache an empty search page: a transient backend timeout
+      // would otherwise pin "no results" for this query for the whole TTL.
+      if (url.pathname === "/api/search" || url.pathname === "/api/catalog/search") {
+        const response = await fetch(upstreamRequest);
+        try {
+          const cloned = response.clone();
+          const json = await cloned.json();
+          const data = json.data || json;
+          const groups = ["items", "songs", "albums", "artists", "playlists"];
+          const hasResults = groups.some((key) => Array.isArray(data[key]) && data[key].length > 0);
+          if (!response.ok || !hasResults) {
+            const outgoing = responseHeaders(response.headers, request, env, "BYPASS");
+            outgoing.set("Cache-Control", "no-store, no-cache, must-revalidate");
+            return new Response(response.body, { status: response.status, headers: outgoing });
+          }
+        } catch (_) {}
+        // Non-empty: fall through to the caching fetch below so the edge
+        // cache is populated (same double-fetch pattern as /api/albums/).
       }
 
       if (url.pathname.startsWith("/api/albums/")) {
