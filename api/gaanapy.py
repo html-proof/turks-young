@@ -29,6 +29,11 @@ class GaanaPy(Songs, Albums, Artists, Trending, NewReleases, Charts, Playlists, 
                 "Accept": "application/json",
                 "X-Forwarded-For": "49.37.0.1",
                 "CF-IPCountry": "IN",
+                # gsearch.gaana.com (vichitih search) returns an empty body
+                # unless the Gaana app identifiers are present.
+                "gaanaAppVersion": "gaanaAndroid-8.60.2",
+                "deviceType": "GaanaWapApp",
+                "deviceId": "website",
             },
         )
         self.api_endpoints = endpoints

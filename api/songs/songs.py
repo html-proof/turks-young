@@ -8,7 +8,7 @@ class Songs:
         endpoints = self.api_endpoints
         errors = self.errors
         clean_q = search_query.strip()
-        result = await self._safe_request("POST", endpoints.search_songs_url + encoded_query(clean_q))
+        result = await self._safe_request("GET", endpoints.search_songs_url + encoded_query(clean_q))
         entries = search_entries(result) if not (isinstance(result, dict) and "error" in result) else []
 
         from api.core.circuit_breaker import CBState
@@ -21,7 +21,7 @@ class Songs:
                 if suffix not in tokens and not clean_lower.endswith(suffix)
             ]
             for expansion in expansions[:2]:
-                exp_result = await self._safe_request("POST", endpoints.search_songs_url + encoded_query(expansion))
+                exp_result = await self._safe_request("GET", endpoints.search_songs_url + encoded_query(expansion))
                 if not (isinstance(exp_result, dict) and "error" in exp_result):
                     exp_entries = search_entries(exp_result)
                     if exp_entries:
@@ -45,15 +45,15 @@ class Songs:
         """Lightweight candidate search for recommendations without fanning out songDetail calls."""
         endpoints = self.api_endpoints
         clean_q = search_query.strip()
-        result = await self._safe_request("POST", endpoints.search_songs_url + encoded_query(clean_q))
+        result = await self._safe_request("GET", endpoints.search_songs_url + encoded_query(clean_q))
         entries = search_entries(result) if not (isinstance(result, dict) and "error" in result) else []
         candidates = []
         for entry in entries[:limit]:
             if isinstance(entry, dict):
                 seo = entry.get("seo") or entry.get("seokey") or entry.get("id") or ""
-                title = entry.get("title") or entry.get("track_title") or entry.get("name") or ""
-                artist = entry.get("artist") or entry.get("artists") or []
-                artwork = entry.get("atw") or entry.get("artwork") or entry.get("artwork_large") or ""
+                title = entry.get("title") or entry.get("ti") or entry.get("track_title") or entry.get("name") or ""
+                artist = entry.get("artist") or entry.get("artists") or entry.get("sti") or []
+                artwork = entry.get("atw") or entry.get("aw") or entry.get("artwork") or entry.get("artwork_large") or ""
                 candidates.append({
                     "id": str(seo),
                     "seokey": str(seo),

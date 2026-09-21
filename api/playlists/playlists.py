@@ -4,7 +4,7 @@ class Playlists:
     async def search_playlists(self, search_query: str, limit: int) -> list:
         clean_q = search_query.strip()
         result = await self._safe_request(
-            "POST", self.api_endpoints.search_playlists_url + encoded_query(clean_q)
+            "GET", self.api_endpoints.search_playlists_url + encoded_query(clean_q)
         )
         entries = search_entries(result) if not (isinstance(result, dict) and "error" in result) else []
 
@@ -17,7 +17,7 @@ class Playlists:
                 if suffix not in tokens and not clean_lower.endswith(suffix)
             ]
             for expansion in expansions[:2]:
-                exp_result = await self._safe_request("POST", self.api_endpoints.search_playlists_url + encoded_query(expansion))
+                exp_result = await self._safe_request("GET", self.api_endpoints.search_playlists_url + encoded_query(expansion))
                 if not (isinstance(exp_result, dict) and "error" in exp_result):
                     exp_entries = search_entries(exp_result)
                     if exp_entries:
@@ -33,10 +33,10 @@ class Playlists:
             seokey = entry.get("seo") or entry.get("seokey")
             if not seokey:
                 continue
-            artwork = entry.get("atw") or entry.get("artwork") or ""
+            artwork = entry.get("atw") or entry.get("aw") or entry.get("artwork") or ""
             playlists.append({
                 "seokey": seokey,
-                "title": entry.get("title") or entry.get("name") or "",
+                "title": entry.get("title") or entry.get("ti") or entry.get("name") or "",
                 "language": entry.get("language") or "",
                 "images": {"urls": {
                     "large_artwork": artwork.replace("size_s", "size_l"),

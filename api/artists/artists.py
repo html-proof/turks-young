@@ -5,7 +5,7 @@ class Artists:
     async def search_artists(self, search_query: str, limit: int) -> list:
         endpoints = self.api_endpoints
         errors = self.errors
-        result = await self._safe_request("POST", endpoints.search_artists_url + encoded_query(search_query))
+        result = await self._safe_request("GET", endpoints.search_artists_url + encoded_query(search_query))
         if isinstance(result, dict) and "error" in result:
             return result
         artist_ids = []
