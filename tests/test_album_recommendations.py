@@ -150,6 +150,24 @@ async def test_album_details_success(service, mock_catalog):
 
 
 @pytest.mark.asyncio
+async def test_album_details_accepts_payloads_with_songs_not_tracks(service, mock_catalog):
+    mock_catalog.get_album_info = AsyncMock(return_value=[{
+        "seokey": "songs-only-album",
+        "title": "Songs Only Album",
+        "trackcount": 2,
+        "songs": [
+            {"track_id": "trk-1", "title": "Song One", "artists": "Artist A"},
+            {"track_id": "trk-2", "title": "Song Two", "artists": "Artist B"},
+        ],
+    }])
+
+    res = await service.album_details("songs-only-album")
+    assert res is not None
+    assert len(res["tracks"]) == 2
+    assert [t["title"] for t in res["tracks"]] == ["Song One", "Song Two"]
+
+
+@pytest.mark.asyncio
 async def test_album_details_with_dict_artist_dedup(service, mock_catalog):
     # Tests that track deduplication works seamlessly when track['artist'] is a normalized dict
     mock_catalog.get_album_info = AsyncMock(return_value=[{

@@ -1683,6 +1683,30 @@ class CatalogService:
 
             fb_candidates = _generate_album_query_candidates(raw_fb_title)
 
+            # A fallback search is allowed to recover a temporarily missing
+            # direct lookup, never to substitute a merely similar release.
+            # Provider search results for a slug such as `game-malayalam`
+            # commonly include albums titled only `Game`; accepting the first
+            # one opened the wrong album in the client.
+            requested_identity = re.sub(r"[^a-z0-9]+", "", album_id.lower())
+
+            def _matches_fallback_album(candidate: dict[str, Any]) -> bool:
+                candidate_id = str(
+                    candidate.get("album_seokey")
+                    or candidate.get("seokey")
+                    or candidate.get("id")
+                    or candidate.get("album_id")
+                    or ""
+                ).strip().lower()
+                if candidate_id == album_id.lower():
+                    return True
+                candidate_title = str(
+                    candidate.get("title") or candidate.get("name") or ""
+                ).lower()
+                return bool(candidate_title) and re.sub(
+                    r"[^a-z0-9]+", "", candidate_title
+                ) == requested_identity
+
             # Resilient fallback: search Gaana by album title / query when the
             # direct album lookup returned no tracks.
             for query in fb_candidates:
@@ -1690,8 +1714,10 @@ class CatalogService:
                     album_search = _clean(await asyncio.wait_for(self.catalog.search_albums(query, 5), timeout=3.5))
                     if isinstance(album_search, list) and album_search:
                         for cand in album_search:
+                            if not isinstance(cand, dict) or not _matches_fallback_album(cand):
+                                continue
                             cand_id = str(cand.get("album_seokey") or cand.get("seokey") or cand.get("id") or cand.get("album_id") or "")
-                            if cand_id and cand_id != album_id:
+                            if cand_id:
                                 try:
                                     info = _clean(await asyncio.wait_for(self.catalog.get_album_info([cand_id], True), timeout=3.5))
                                     if isinstance(info, list) and info:

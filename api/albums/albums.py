@@ -52,6 +52,20 @@ class Albums:
         endpoints = self.api_endpoints
         errors = self.errors
 
+        def _is_requested_album(payload: dict, requested_id: str) -> bool:
+            """Reject a provider response for a different slug.
+
+            Gaana occasionally answers a failed slug request with a related
+            album rather than an error. Returning that payload makes a tap on
+            `game-malayalam` open another `Game` album. Numeric provider IDs
+            cannot use this check, but a slug must round-trip exactly.
+            """
+            if requested_id.isdigit():
+                return True
+            meta = payload.get("album") if isinstance(payload.get("album"), dict) else {}
+            actual = str(meta.get("seokey") or meta.get("seo") or "").strip().lower()
+            return bool(actual) and actual == requested_id.lower()
+
         async def _fetch_one(aid: str) -> dict:
             i_str = str(aid).strip()
             if not i_str:
@@ -67,7 +81,11 @@ class Albums:
             res = await self._safe_request("POST", endpoints.album_details_url + encoded_id(i_str))
             if isinstance(res, dict) and (res.get("album") or res.get("tracks")):
                 alb_meta = res.get("album") if isinstance(res.get("album"), dict) else {}
-                if str(alb_meta.get("title")).lower() != "undefined" and str(alb_meta.get("seokey")).lower() != "undefined":
+                if (
+                    str(alb_meta.get("title")).lower() != "undefined"
+                    and str(alb_meta.get("seokey")).lower() != "undefined"
+                    and _is_requested_album(res, i_str)
+                ):
                     return res
             return {}
 
@@ -89,9 +107,16 @@ class Albums:
             result = await self._safe_request("POST", url)
             if isinstance(result, dict) and "error" in result:
                 return result
-            raw_tracks = result.get('tracks') or (result.get('album', {}).get('tracks') if isinstance(result.get('album'), dict) else None) or []
-            if not album_meta and isinstance(result.get('album'), dict):
-                album_meta = result['album']
+            album_payload = result.get('album') if isinstance(result, dict) else None
+            raw_tracks = (
+                result.get('tracks')
+                or result.get('songs')
+                or (album_payload.get('tracks') if isinstance(album_payload, dict) else None)
+                or (album_payload.get('songs') if isinstance(album_payload, dict) else None)
+                or []
+            )
+            if not album_meta and isinstance(album_payload, dict):
+                album_meta = album_payload
 
         if isinstance(raw_tracks, list) and raw_tracks:
             formatted_tracks = []
@@ -217,6 +242,13 @@ class Albums:
         data['images']['urls']['small_artwork'] = artwork
 
         if info:
-            raw_tracks = results.get('tracks') or (album.get('tracks') if isinstance(album, dict) else None) or []
+            album_payload = album if isinstance(album, dict) else {}
+            raw_tracks = (
+                results.get('tracks')
+                or results.get('songs')
+                or album_payload.get('tracks')
+                or album_payload.get('songs')
+                or []
+            )
             data['tracks'] = await self.get_album_tracks(data['seokey'], raw_tracks=raw_tracks, album_meta=album, fetch_missing=fetch_missing_tracks)
         return data
