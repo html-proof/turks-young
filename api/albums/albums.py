@@ -1,5 +1,16 @@
 import asyncio
+import re
 from api.provider_search import encoded_id, encoded_query, search_entries
+
+# Titles that indicate a curated collection or compilation rather than a
+# canonical album.  Tracks inside these containers keep their own album
+# identity; the container seokey must NOT be stamped onto them.
+_COMPILATION_CONTAINER_RE = re.compile(
+    r"\b(?:hits|best\s+of|all\s+time|compilation|collection|anthology|"
+    r"celebrating|celebration|greatest|tribute|playlist|curated|"
+    r"vol(?:\b|\.)|volume\b|blast|love\s+songs|soulful|party\s+mix|recall)\b",
+    re.IGNORECASE,
+)
 
 
 class Albums:
@@ -145,13 +156,24 @@ class Albums:
                 album_meta = album_payload
 
         if isinstance(raw_tracks, list) and raw_tracks:
+            # A compilation/collection container must not overwrite a track's
+            # canonical album identity.  "Badass (From Leo)" inside
+            # "Celebrating Thalapathy Vijay" still belongs to "Leo"; stamping
+            # the compilation seokey onto the track corrupts album navigation.
+            is_compilation_container = False
+            if album_meta:
+                container_title = str(album_meta.get('title') or album_meta.get('name') or '')
+                is_compilation_container = bool(_COMPILATION_CONTAINER_RE.search(container_title))
+
             formatted_tracks = []
             for t in raw_tracks:
                 if isinstance(t, dict):
                     if album_meta:
                         if not t.get('album_title') and album_meta.get('title'):
                             t['album_title'] = album_meta['title']
-                        if not t.get('albumseokey') and album_meta.get('seokey'):
+                        # Only propagate the container's seokey when this is a
+                        # genuine album, not a compilation/collection.
+                        if not t.get('albumseokey') and album_meta.get('seokey') and not is_compilation_container:
                             t['albumseokey'] = album_meta['seokey']
                         if not t.get('artwork') and album_meta.get('artwork'):
                             t['artwork'] = album_meta['artwork']
@@ -181,7 +203,7 @@ class Albums:
                                     'seokey': effective_seokey,
                                     'title': title,
                                     'album': album_meta.get('title') if album_meta else '',
-                                    'album_seokey': album_meta.get('seokey') if album_meta else '',
+                                    'album_seokey': (album_meta.get('seokey') if album_meta and not is_compilation_container else ''),
                                     'duration': str(t.get('duration') or ''),
                                     'artist': t.get('artist') or t.get('artists') or '',
                                     'artwork': album_meta.get('artwork') if album_meta else '',
@@ -194,7 +216,7 @@ class Albums:
                                 'seokey': str(t.get('track_id') or t.get('id') or ''),
                                 'title': title,
                                 'album': album_meta.get('title') if album_meta else '',
-                                'album_seokey': album_meta.get('seokey') if album_meta else '',
+                                'album_seokey': (album_meta.get('seokey') if album_meta and not is_compilation_container else ''),
                                 'duration': str(t.get('duration') or ''),
                                 'artist': t.get('artist') or t.get('artists') or '',
                                 'artwork': album_meta.get('artwork') if album_meta else '',

@@ -909,7 +909,7 @@ def _word_match(query: str, item: dict[str, Any], kind: str) -> bool:
 
 
 _COMPILATION_ALBUM_PATTERNS = re.compile(
-    r"\b(hits|best of|all time|compilation|collection|anthology|vol\b|volume\b|blast|love songs|soulful|greatest|tribute|celebration|party mix|recall|playlist)\b",
+    r"\b(hits|best of|all time|compilation|collection|anthology|vol\b|volume\b|blast|love songs|soulful|greatest|tribute|celebration|celebrating|party mix|recall|playlist)\b",
     re.IGNORECASE,
 )
 
