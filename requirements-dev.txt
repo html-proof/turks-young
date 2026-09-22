@@ -1,0 +1,2 @@
+-r requirements.txt
+pydantic-settings>=2.14.2
