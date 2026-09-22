@@ -858,7 +858,10 @@ class CatalogService:
 
         # v4 invalidates in-process entries that may hold provider-timeout
         # empties produced before empty outcomes were kept out of the caches.
-        mem_key = f"v4:{query.strip().lower()}:{kind}:{page}:{limit}:{user_uid or 'anon'}"
+        # exact=True disables spelling correction, so it must not share a cache
+        # entry with a normal (correctable) search for the same query.
+        _exact_flag = "e" if not _allow_correction else "n"
+        mem_key = f"v4:{query.strip().lower()}:{kind}:{page}:{limit}:{user_uid or 'anon'}:{_exact_flag}"
         now = time.monotonic()
         if mem_key in self._search_mem_cache:
             cached_ts, cached_payload = self._search_mem_cache[mem_key]

@@ -59,12 +59,38 @@ class Albums:
             album rather than an error. Returning that payload makes a tap on
             `game-malayalam` open another `Game` album. Numeric provider IDs
             cannot use this check, but a slug must round-trip exactly.
+
+            Leniency: Gaana stores some albums under a shorter seokey (e.g.
+            `thuruppugulan` internally for a requested slug of
+            `thuruppugulan-original-motion-picture-soundtrack`). Accept when
+            the requested slug starts with the actual slug followed by a
+            hyphen, but only when every extra token beyond the actual slug is
+            a generic content-descriptor word. This keeps `game` from
+            matching `game-malayalam` (language token is not a descriptor)
+            while letting `thuruppugulan` match
+            `thuruppugulan-original-motion-picture-soundtrack`.
             """
             if requested_id.isdigit():
                 return True
             meta = payload.get("album") if isinstance(payload.get("album"), dict) else {}
             actual = str(meta.get("seokey") or meta.get("seo") or "").strip().lower()
-            return bool(actual) and actual == requested_id.lower()
+            req = requested_id.lower()
+            if not actual:
+                return False
+            if actual == req:
+                return True
+            # Accept abbreviated Gaana seokeys when all extra tokens are
+            # generic descriptors that never identify a language or region.
+            if req.startswith(actual + '-'):
+                extra = set(req[len(actual) + 1:].split('-'))
+                _descriptors = frozenset({
+                    'original', 'motion', 'picture', 'soundtrack', 'ost',
+                    'songs', 'music', 'album', 'hits', 'collection', 'the',
+                    'vol', 'volume', 'part', 'special', 'edition',
+                })
+                if extra and extra.issubset(_descriptors):
+                    return True
+            return False
 
         async def _fetch_one(aid: str) -> dict:
             i_str = str(aid).strip()
