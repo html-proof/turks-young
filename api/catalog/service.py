@@ -142,6 +142,23 @@ def _album_artist_names(item: dict[str, Any]) -> list[str]:
     return names
 
 
+def _safe_int(value: Any) -> int:
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_year(value: Any) -> int | None:
+    match = re.match(r"\s*(\d{4})", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def _fingerprint_text(value: Any) -> str:
+    """Script-agnostic key: lowercase letters and digits only (keeps non-Latin titles)."""
+    return re.sub(r"[\W_]+", "", str(value or "").lower())
+
+
 class LanguageCatalog:
     _STANDARD_CODES = {
         "malayalam": "ml", "tamil": "ta", "hindi": "hi", "english": "en",
@@ -257,7 +274,7 @@ class CatalogService:
             return fallback
 
         try:
-            return str(await self._cached(f"music:artwork:album_cover:v1:{key}", config.TTL_ALBUM, load) or "")
+            return str(await self._cached(f"music:artwork:album_cover:v2:{key}", config.TTL_ALBUM, load) or "")
         except Exception:
             return ""
 
@@ -1597,7 +1614,7 @@ class CatalogService:
             }
 
         return await self._cached(
-            f"music:artist_details:{artist_id}:{limit}:v1",
+            f"music:artist_details:{artist_id}:{limit}:v2",
             getattr(config, "TTL_ARTIST_DETAILS", config.TTL_ARTIST),
             load,
             config.STALE_CACHE_TTL,
@@ -1752,19 +1769,36 @@ class CatalogService:
                             )
                             first_raw_id = first_album_raw.get("id") if isinstance(first_album_raw, dict) else ""
                             first_prov_id = first_album_raw.get("provider_id") if isinstance(first_album_raw, dict) else ""
+                            def _norm_title(value: Any) -> str:
+                                return re.sub(r"[^a-z0-9]+", "", re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "", str(value or "").lower()))
+                            wanted_titles = {_norm_title(c) for c in fb_candidates} - {""}
+                            if _norm_title(first_album_name) not in wanted_titles:
+                                # The top hit belongs to a different album; only
+                                # exact album-id matches may be recovered.
+                                first_album_name = ""
+                                first_raw_id = ""
                             matched_songs = [
                                 s for s in song_items
                                 if (
-                                    (isinstance(s.get("album"), dict) and s["album"].get("name", "").lower() == first_album_name.lower())
-                                    or str(s.get("album") or "").lower() == first_album_name.lower()
+                                    (first_album_name and isinstance(s.get("album"), dict) and s["album"].get("name", "").lower() == first_album_name.lower())
+                                    or (first_album_name and str(s.get("album") or "").lower() == first_album_name.lower())
                                     or (isinstance(s.get("album"), dict) and s["album"].get("id") == album_id)
                                     or (isinstance(s.get("album"), dict) and s["album"].get("provider_id") == album_id)
                                     or (first_raw_id and isinstance(s.get("album"), dict) and s["album"].get("id") == first_raw_id)
                                 )
                             ]
-                            raw_resolved = matched_songs if matched_songs else song_items[:12]
+                            # Never substitute arbitrary search hits: they belong
+                            # to other albums and render as a bogus 1–12 song list.
+                            if not matched_songs:
+                                continue
+                            raw_resolved = matched_songs
                             resolved_songs = [song(s) for s in raw_resolved if isinstance(s, dict)]
+                            logger.warning(
+                                "album_details partial search recovery album_id=%s tracks=%d",
+                                album_id, len(resolved_songs),
+                            )
                             return {
+                                "is_complete": False,
                                 "id": str(album_meta.get("id") or first_raw_id or album_id),
                                 "seokey": str(album_meta.get("seokey") or first_raw_id or album_id),
                                 "provider_id": str(album_meta.get("provider_id") or first_prov_id or album_id),
@@ -1808,7 +1842,7 @@ class CatalogService:
             return res
 
         return await self._cached(
-            f"catalog:album:{album_id}:tracks-v4",
+            f"catalog:album:{album_id}:tracks-v5",
             getattr(config, "TTL_ALBUM", 21600),
             load_with_guard,
             getattr(config, "STALE_CACHE_TTL", 3600),
@@ -1818,25 +1852,33 @@ class CatalogService:
         self, album_id: str, user_profile: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """Generate smart album recommendations for the currently viewed album."""
-        cache_key = f"music:album:recs:{album_id}:v2"
+        cache_key = f"music:album:recs:{album_id}:v3"
 
         async def compute_recommendations() -> dict[str, Any]:
-            alb = await self.album_details(album_id)
-            if not alb:
-                return {
-                    "albumId": album_id,
-                    "primaryArtist": "",
-                    "recommendations": [],
-                    "moreByArtist": [],
-                    "youMightAlsoLike": [],
-                }
+            empty = {
+                "albumId": album_id,
+                "primaryArtist": "",
+                "recommendations": [],
+                "moreByArtist": [],
+                "youMightAlsoLike": [],
+            }
+            try:
+                alb = await self.album_details(album_id)
+            except Exception as exc:
+                logger.warning(
+                    "RECOMMENDATION_SOURCE_FAILED album_id=%s source=album_details error_type=%s error=%s",
+                    album_id, type(exc).__name__, str(exc) or "(no message)",
+                )
+                return empty
+            if not isinstance(alb, dict) or not alb:
+                return empty
 
             canonical_id = alb.get("id") or album_id
             current_title = (alb.get("title") or alb.get("name") or "").lower().strip()
             artist_names = [n for n in (alb.get("artistNames") or [alb.get("artist") or ""]) if n]
             primary_artist = artist_names[0] if artist_names else ""
             album_lang = str(alb.get("language") or "").strip()
-            album_year = alb.get("releaseYear")
+            album_year = _safe_year(alb.get("releaseYear") or alb.get("release_date"))
             album_genre = str(alb.get("genre") or alb.get("label") or "").strip()
 
             candidates_raw: list[dict[str, Any]] = []
@@ -1920,38 +1962,35 @@ class CatalogService:
                 t = t.lower().strip()
                 t = re.sub(r'[\(\[\{].*?[\)\]\}]', '', t)
                 t = re.sub(r'\b(?:original motion picture soundtrack|soundtrack|ost|vol(?:ume)?\.?\s*\d+|ep|single)\b', '', t, flags=re.I)
-                return re.sub(r'[^a-z0-9]+', '', t).strip()
+                return _fingerprint_text(t)
 
             current_clean_title = _clean_title(current_title)
             if current_clean_title:
-                curr_art_key = re.sub(r'[^a-z0-9]+', '', primary_artist.lower()).strip()
-                seen_semantic_keys.add(f"{current_clean_title}-{curr_art_key}")
+                seen_semantic_keys.add(f"{current_clean_title}-{_fingerprint_text(primary_artist)}")
 
             user_fav_artists = [a.lower() for a in ((user_profile or {}).get("favorite_artists") or [])]
             user_pref_langs = [l.lower() for l in user_langs]
 
-            for raw in candidates_raw:
-                if not isinstance(raw, dict):
-                    continue
+            def _score_candidate(raw: dict[str, Any]) -> tuple[int, dict[str, Any]] | None:
                 norm = album(raw)
                 cid = str(norm.get("id") or norm.get("seokey") or "").strip()
                 ctitle = str(norm.get("title") or norm.get("name") or "").strip()
                 if not cid or not ctitle:
-                    continue
+                    return None
 
                 cid_lower = cid.lower()
                 cand_clean_title = _clean_title(ctitle)
                 cand_artists = [a.lower() for a in (norm.get("artistNames") or [norm.get("artist") or ""])]
                 primary_cand_art = cand_artists[0] if cand_artists else ""
-                art_key = re.sub(r'[^a-z0-9]+', '', primary_cand_art).strip()
+                art_key = _fingerprint_text(primary_cand_art)
                 semantic_key = f"{cand_clean_title}-{art_key}" if cand_clean_title else ""
 
                 if cid_lower in seen_ids:
-                    continue
+                    return None
                 if semantic_key and semantic_key in seen_semantic_keys:
-                    continue
+                    return None
                 if cand_clean_title and cand_clean_title == current_clean_title:
-                    continue
+                    return None
 
                 seen_ids.add(cid_lower)
                 if semantic_key:
@@ -1986,8 +2025,8 @@ class CatalogService:
                     score += 20
 
                 # Priority 4: Release year similarity (+10 or +5)
-                cyear = norm.get("releaseYear")
-                if cyear and album_year:
+                cyear = _safe_year(norm.get("releaseYear") or norm.get("release_date"))
+                if cyear is not None and album_year is not None:
                     diff = abs(cyear - album_year)
                     if diff <= 3:
                         score += 10
@@ -1995,7 +2034,7 @@ class CatalogService:
                         score += 5
 
                 # Base popularity (+5)
-                if norm.get("song_count", 0) > 0:
+                if _safe_int(norm.get("song_count")) > 0:
                     score += 5
 
                 rec_item = {
@@ -2010,7 +2049,22 @@ class CatalogService:
                     "songCount": norm.get("song_count") or norm.get("trackCount") or 0,
                     "reason": reason,
                 }
-                scored.append((score, rec_item))
+                return score, rec_item
+
+            for raw in candidates_raw:
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    scored_item = _score_candidate(raw)
+                except Exception as exc:
+                    logger.warning(
+                        "RECOMMENDATION_SOURCE_FAILED album_id=%s source=candidate candidate=%s error_type=%s error=%s",
+                        album_id, str(raw.get("seokey") or raw.get("id") or "")[:120],
+                        type(exc).__name__, str(exc) or "(no message)",
+                    )
+                    continue
+                if scored_item is not None:
+                    scored.append(scored_item)
 
             scored.sort(key=lambda x: x[0], reverse=True)
 
@@ -2043,12 +2097,36 @@ class CatalogService:
                 "youMightAlsoLike": you_might_like,
             }
 
-        return await self._cached(
-            cache_key,
-            config.TTL_ALBUM if hasattr(config, "TTL_ALBUM") else 1800,
-            compute_recommendations,
-            config.STALE_CACHE_TTL if hasattr(config, "STALE_CACHE_TTL") else 3600,
-        )
+        stale = None
+        if self.cache is not None and hasattr(self.cache, "get_with_stale"):
+            try:
+                stale, fresh = await self.cache.get_with_stale(cache_key)
+                if isinstance(stale, dict) and fresh:
+                    return stale
+            except Exception:
+                stale = None
+        try:
+            result = await compute_recommendations()
+        except Exception as exc:
+            logger.warning(
+                "RECOMMENDATION_SOURCE_FAILED album_id=%s source=compute error_type=%s error=%s",
+                album_id, type(exc).__name__, str(exc) or "(no message)",
+            )
+            if isinstance(stale, dict):
+                return stale
+            raise
+        if self.cache is not None and hasattr(self.cache, "set_with_stale"):
+            # An empty list is usually a provider hiccup; keep it only long
+            # enough to absorb a burst of retries, never for the album TTL.
+            if result.get("recommendations"):
+                ttl, stale_ttl = config.TTL_ALBUM, config.STALE_CACHE_TTL
+            else:
+                ttl, stale_ttl = config.TTL_EMPTY_RECOMMENDATIONS, 0
+            try:
+                await self.cache.set_with_stale(cache_key, result, ttl, stale_ttl)
+            except Exception:
+                pass
+        return result
 
     async def home_page(
         self,

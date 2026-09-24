@@ -1,7 +1,36 @@
 import asyncio
 import html
+import logging
 import re
+import time
+
+import httpx
+
+from api.catalog.artwork import normalize_url, with_upgraded_candidates
+from api.core import config
 from api.provider_search import encoded_id, encoded_query, search_entries
+from api.songs.playback import (
+    DECRYPT_FAILED,
+    IDENTITY_MATCH_THRESHOLD,
+    NO_VALID_SOURCE,
+    identity_score,
+    playback_cache_key,
+    playback_cache_ttl,
+    redact_url,
+    song_info_cache_key,
+    validate_stream,
+)
+
+logger = logging.getLogger(__name__)
+
+_STREAM_QUALITIES = ('medium', 'high', 'auto')
+_BITRATE_VARIANTS = ("128", "64", "320", "16")
+_IDENTITY_SEARCH_LIMIT = 3
+
+
+def _upgraded_artwork(url: str) -> str:
+    return re.sub(r'size_[sm](?=\.jpg)', 'size_l', url)
+
 
 class Songs:
     async def search_songs(self, search_query: str, limit: int) -> list:
@@ -80,7 +109,7 @@ class Songs:
         if cache and hasattr(cache, "get") and not force_refresh:
             for tid in track_id:
                 try:
-                    hit = await cache.get(f"songs:info:{tid}")
+                    hit = await cache.get(song_info_cache_key(tid))
                     if hit and isinstance(hit, list) and len(hit) > 0:
                         track_info.extend(hit)
                     else:
@@ -105,11 +134,11 @@ class Songs:
                 valid_formatted = [t for t in formatted_tracks if t and not (isinstance(t, dict) and "error" in t)]
                 if valid_formatted:
                     track_info.extend(valid_formatted)
-                    if cache and hasattr(cache, "set"):
+                    # An entry without a stream URL is a provider failure,
+                    # not a fact about the song; never pin it in the cache.
+                    if cache and hasattr(cache, "set") and all(t.get('stream_url') for t in valid_formatted):
                         try:
-                            from api.core import config
-                            ttl = getattr(config, "TTL_SONG", 21600)
-                            await cache.set(f"songs:info:{i}", valid_formatted, ttl)
+                            await cache.set(song_info_cache_key(i), valid_formatted, config.TTL_SONG)
                         except Exception:
                             pass
 
@@ -169,54 +198,253 @@ class Songs:
             f"https://gaana.com/album/{data['album_seokey']}"
             if data['album_seokey'] else ''
         )
-        artwork = results.get('artwork_large') or results.get('artwork_web') or results.get('artwork') or ''
-        data['images'] = {'urls': {}}
-        data['images']['urls']['large_artwork'] = results.get('artwork_large') or (artwork.replace("size_s.jpg", "size_l.jpg").replace("size_m.jpg", "size_l.jpg") if artwork else '')
-        data['images']['urls']['medium_artwork'] = results.get('artwork_web') or (artwork.replace("size_s.jpg", "size_m.jpg") if artwork else '')
-        data['images']['urls']['small_artwork'] = results.get('artwork') or artwork
+        artwork_sizes = [
+            normalize_url(results.get(field)) or ''
+            for field in ('artwork_large', 'artwork_web', 'artwork')
+        ]
+        artwork = next((url for url in artwork_sizes if url), '')
+        # Only the provider's own URLs fill the size slots. A guessed larger
+        # size is offered solely as an extra candidate ahead of the original.
+        data['images'] = {'urls': {
+            'large_artwork': artwork_sizes[0] or artwork,
+            'medium_artwork': artwork_sizes[1] or artwork,
+            'small_artwork': artwork_sizes[2] or artwork,
+        }}
+        data['artwork_candidates'] = with_upgraded_candidates(
+            [url for url in artwork_sizes if url], _upgraded_artwork
+        )
         data['stream_urls'] = {'urls': {}}
 
-        try:
-            urls = results.get('urls', {})
-            stream_msg = ""
-            for quality in ('medium', 'high', 'auto'):
-                q_dict = urls.get(quality) if isinstance(urls, dict) else None
-                if isinstance(q_dict, dict) and q_dict.get('message'):
-                    stream_msg = q_dict['message']
-                    break
-            if stream_msg:
-                base_url = await functions.decryptLink(stream_msg)
-                if base_url:
-                    data['stream_urls']['urls']['raw'] = base_url
-                    data['stream_urls']['urls']['default'] = base_url
-                    base_clean = re.sub(r'\b(?:16|64|128|320)\.mp4', '{bitrate}.mp4', base_url)
-                    if "{bitrate}.mp4" in base_clean:
-                        data['stream_urls']['urls']['very_high_quality'] = base_clean.format(bitrate="128")
-                        data['stream_urls']['urls']['high_quality'] = base_clean.format(bitrate="128")
-                        data['stream_urls']['urls']['medium_quality'] = base_clean.format(bitrate="128")
-                        data['stream_urls']['urls']['low_quality'] = base_clean.format(bitrate="64")
-                    else:
-                        data['stream_urls']['urls']['very_high_quality'] = base_url
-                        data['stream_urls']['urls']['high_quality'] = base_url
-                        data['stream_urls']['urls']['medium_quality'] = base_url
-                        data['stream_urls']['urls']['low_quality'] = base_url
-                else:
-                    raise KeyError
+        stream_messages = self._stream_messages(results)
+        base_url = ''
+        for message in stream_messages:
+            base_url = await functions.decryptLink(message)
+            if base_url:
+                break
+        urls = data['stream_urls']['urls']
+        if base_url:
+            urls['raw'] = base_url
+            urls['default'] = base_url
+            base_clean = re.sub(r'\b(?:16|64|128|320)\.mp4', '{bitrate}.mp4', base_url)
+            if "{bitrate}.mp4" in base_clean:
+                urls['very_high_quality'] = base_clean.format(bitrate="128")
+                urls['high_quality'] = base_clean.format(bitrate="128")
+                urls['medium_quality'] = base_clean.format(bitrate="128")
+                urls['low_quality'] = base_clean.format(bitrate="64")
             else:
-                raise KeyError
-        except (KeyError, AttributeError):
-            data['stream_urls']['urls']['very_high_quality'] = ""
-            data['stream_urls']['urls']['high_quality'] = ""
-            data['stream_urls']['urls']['medium_quality'] = ""
-            data['stream_urls']['urls']['low_quality'] = ""
+                urls['very_high_quality'] = base_url
+                urls['high_quality'] = base_url
+                urls['medium_quality'] = base_url
+                urls['low_quality'] = base_url
+        else:
+            urls['very_high_quality'] = ""
+            urls['high_quality'] = ""
+            urls['medium_quality'] = ""
+            urls['low_quality'] = ""
 
         data['stream_url'] = (
-            data['stream_urls']['urls'].get('high_quality')
-            or data['stream_urls']['urls'].get('medium_quality')
-            or data['stream_urls']['urls'].get('default')
-            or data['stream_urls']['urls'].get('raw')
-            or data['stream_urls']['urls'].get('low_quality')
+            urls.get('high_quality')
+            or urls.get('medium_quality')
+            or urls.get('default')
+            or urls.get('raw')
+            or urls.get('low_quality')
             or ""
+        )
+        data['playable'] = bool(data['stream_url'])
+        data['unavailable_reason'] = (
+            None if data['playable']
+            else DECRYPT_FAILED if stream_messages
+            else NO_VALID_SOURCE
         )
 
         return data
+
+    @staticmethod
+    def _stream_messages(results: dict) -> list:
+        urls = results.get('urls') if isinstance(results, dict) else None
+        if not isinstance(urls, dict):
+            return []
+        messages = []
+        for quality in _STREAM_QUALITIES:
+            q_dict = urls.get(quality)
+            if isinstance(q_dict, dict) and q_dict.get('message') and q_dict['message'] not in messages:
+                messages.append(q_dict['message'])
+        return messages
+
+    async def _stream_variants(self, track: dict, raw: dict) -> list:
+        """Every distinct decrypted URL and bitrate rendition for a track, primary first."""
+        urls = (track.get('stream_urls') or {}).get('urls') or {}
+        ordered = [track.get('stream_url')]
+        ordered += [urls.get(k) for k in ('high_quality', 'medium_quality', 'default', 'raw', 'low_quality')]
+        for message in self._stream_messages(raw):
+            ordered.append(await self.functions.decryptLink(message))
+        variants = []
+        for url in ordered:
+            if not url:
+                continue
+            template = re.sub(r'\b(?:16|64|128|320)\.mp4', '{bitrate}.mp4', url)
+            expanded = [url]
+            if '{bitrate}.mp4' in template:
+                expanded += [template.replace('{bitrate}', bitrate) for bitrate in _BITRATE_VARIANTS]
+            for candidate in expanded:
+                if candidate not in variants:
+                    variants.append(candidate)
+        return variants
+
+    @staticmethod
+    def _apply_stream(track: dict, url: str) -> None:
+        urls = track.setdefault('stream_urls', {}).setdefault('urls', {})
+        for key in ('raw', 'default', 'very_high_quality', 'high_quality', 'medium_quality', 'low_quality'):
+            urls[key] = url
+        track['stream_url'] = url
+        track['playable'] = True
+        track['unavailable_reason'] = None
+
+    @staticmethod
+    def _mark_unplayable(track: dict, reason: str) -> None:
+        urls = track.setdefault('stream_urls', {}).setdefault('urls', {})
+        for key in list(urls):
+            urls[key] = ""
+        track['stream_url'] = ""
+        track['playable'] = False
+        track['unavailable_reason'] = reason
+
+    async def _song_detail_tracks(self, seokey: str) -> list:
+        result = await self._safe_request("POST", self.api_endpoints.song_details_url + encoded_id(seokey))
+        if not isinstance(result, dict) or "error" in result:
+            return []
+        tracks = result.get('tracks')
+        return [t for t in tracks if isinstance(t, dict)] if isinstance(tracks, list) else []
+
+    async def _first_valid_stream(self, client: httpx.AsyncClient, seokey: str, variants: list) -> str:
+        for url in variants:
+            check = await validate_stream(client, url)
+            if check.ok:
+                return url
+            logger.warning(
+                "STREAM_VALIDATION_FAILED provider=gaana id=%s url=%s status=%s content_type=%s error=%s",
+                seokey, redact_url(url), check.status, check.content_type or "-", check.error or "-",
+            )
+        return ""
+
+    async def _recover_by_identity(self, track: dict, client: httpx.AsyncClient) -> bool:
+        """Find the same recording under another Gaana id via a title search."""
+        seokey = track.get('seokey') or ''
+        title = track.get('title') or ''
+        if not title:
+            return False
+        primary_artist = str(track.get('artists') or '').split(',')[0].strip()
+        query = f"{title} {primary_artist}".strip()
+        result = await self._safe_request("GET", self.api_endpoints.search_songs_url + encoded_query(query))
+        entries = search_entries(result) if not (isinstance(result, dict) and "error" in result) else []
+        candidate_ids = []
+        for entry in entries:
+            cid = (entry.get('seo') or entry.get('seokey')) if isinstance(entry, dict) else None
+            if cid and cid != seokey and cid not in candidate_ids:
+                candidate_ids.append(cid)
+            if len(candidate_ids) >= _IDENTITY_SEARCH_LIMIT:
+                break
+        for cid in candidate_ids:
+            for raw in await self._song_detail_tracks(cid):
+                candidate = await self.format_json_songs(raw)
+                if not isinstance(candidate, dict) or "error" in candidate or not candidate.get('stream_url'):
+                    continue
+                score = identity_score(track, candidate)
+                if score < IDENTITY_MATCH_THRESHOLD:
+                    logger.info(
+                        "identity candidate rejected provider=gaana id=%s candidate=%s score=%.3f",
+                        seokey, cid, score,
+                    )
+                    continue
+                url = await self._first_valid_stream(client, cid, await self._stream_variants(candidate, raw))
+                if url:
+                    self._apply_stream(track, url)
+                    track['playback_source'] = {
+                        'provider': 'gaana',
+                        'id': candidate.get('seokey') or cid,
+                        'match_score': score,
+                    }
+                    return True
+        return False
+
+    async def _resolve_track(self, track: dict, raw: dict, client: httpx.AsyncClient) -> dict:
+        seokey = track.get('seokey') or ''
+        started = time.perf_counter()
+        logger.info("PLAYBACK_RESOLVE_STARTED provider=gaana id=%s", seokey)
+        primary = track.get('stream_url') or ''
+        if primary and await self._first_valid_stream(client, seokey, [primary]):
+            track['playable'] = True
+            track['unavailable_reason'] = None
+            source = 'primary'
+        else:
+            decrypt_failed = not primary and bool(self._stream_messages(raw))
+            if decrypt_failed:
+                failure = DECRYPT_FAILED
+            elif primary:
+                failure = "VALIDATION_FAILED"
+            else:
+                failure = NO_VALID_SOURCE
+            logger.warning("PRIMARY_RESOLVE_FAILED provider=gaana id=%s reason=%s", seokey, failure)
+            logger.info("ALTERNATE_RESOLVE_STARTED provider=gaana id=%s source=variants", seokey)
+            variants = [url for url in await self._stream_variants(track, raw) if url != primary]
+            url = await self._first_valid_stream(client, seokey, variants)
+            if url:
+                self._apply_stream(track, url)
+                source = 'variant'
+            else:
+                logger.info("ALTERNATE_RESOLVE_STARTED provider=gaana id=%s source=identity_search", seokey)
+                if await self._recover_by_identity(track, client):
+                    source = 'identity'
+                else:
+                    reason = DECRYPT_FAILED if decrypt_failed else NO_VALID_SOURCE
+                    self._mark_unplayable(track, reason)
+                    logger.warning(
+                        "PLAYBACK_UNAVAILABLE provider=gaana id=%s reason=%s latency_ms=%.1f",
+                        seokey, reason, (time.perf_counter() - started) * 1000,
+                    )
+                    return track
+        logger.info(
+            "PLAYBACK_RESOLVED provider=gaana id=%s source=%s url=%s latency_ms=%.1f",
+            seokey, source, redact_url(track.get('stream_url')), (time.perf_counter() - started) * 1000,
+        )
+        return track
+
+    async def resolve_song_playback(self, seokey: str, *, refresh: bool = False):
+        """Song details whose stream URL has been verified to serve audio.
+
+        Validated results are cached briefly under a versioned key; unplayable
+        results are never cached so the next request retries the provider.
+        """
+        cache = getattr(self, "cache", None)
+        key = playback_cache_key(seokey)
+        if cache and hasattr(cache, "get") and not refresh:
+            try:
+                hit = await cache.get(key)
+                if isinstance(hit, list) and hit:
+                    return hit
+            except Exception:
+                pass
+
+        pairs = []
+        for raw in await self._song_detail_tracks(seokey):
+            formatted = await self.format_json_songs(raw)
+            if isinstance(formatted, dict) and "error" not in formatted:
+                pairs.append((formatted, raw))
+        if not pairs:
+            return await self.errors.no_results()
+
+        client = getattr(self, "stream_http_client", None)
+        if client is None:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=config.STREAM_VALIDATION_TIMEOUT) as owned:
+                resolved = [await self._resolve_track(t, r, owned) for t, r in pairs]
+        else:
+            resolved = [await self._resolve_track(t, r, client) for t, r in pairs]
+
+        if cache and hasattr(cache, "set") and all(t.get('playable') for t in resolved):
+            ttl = min(playback_cache_ttl(t.get('stream_url')) for t in resolved)
+            if ttl > 0:
+                try:
+                    await cache.set(key, resolved, ttl)
+                except Exception:
+                    pass
+        return resolved

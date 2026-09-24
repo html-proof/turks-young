@@ -41,6 +41,10 @@ CB_WINDOW            = int(os.getenv("CB_WINDOW", "60"))
 
 TTL_SONG         = int(os.getenv("TTL_SONG",         "1800"))
 TTL_ALBUM        = int(os.getenv("TTL_ALBUM",        "21600"))
+# Validated playback entries hold signed stream URLs; keep them short-lived.
+TTL_PLAYBACK     = int(os.getenv("TTL_PLAYBACK",     "300"))
+TTL_EMPTY_RECOMMENDATIONS = int(os.getenv("TTL_EMPTY_RECOMMENDATIONS", "60"))
+STREAM_VALIDATION_TIMEOUT = float(os.getenv("STREAM_VALIDATION_TIMEOUT", "8"))
 TTL_ARTIST       = int(os.getenv("TTL_ARTIST",       "21600"))
 TTL_ARTIST_DETAILS = int(os.getenv("TTL_ARTIST_DETAILS", "21600"))
 TTL_PLAYLIST     = int(os.getenv("TTL_PLAYLIST",     "3600"))

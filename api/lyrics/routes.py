@@ -3,9 +3,9 @@ import logging
 from fastapi import APIRouter, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 
-from api.core import config
 from api.lyrics.models import LyricsResponse
 from api.lyrics.provider import LyricsProviderError, LyricsRateLimited
+from api.songs.playback import song_info_cache_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["lyrics"])
@@ -23,7 +23,7 @@ async def _lyrics_for_track(
     isrc: str | None = None,
 ):
     cache = getattr(request.app.state, "cache", None)
-    cache_key = f"songs:info:{track_id}"
+    cache_key = song_info_cache_key(track_id)
     # If title is provided, use it directly without blocking on upstream gaanapy lookup
     supplied_metadata = bool(title and str(title).strip())
     tracks = None
@@ -34,9 +34,8 @@ async def _lyrics_for_track(
             pass
     if tracks is None and not supplied_metadata:
         try:
+            # get_track_info owns the song cache and skips unplayable entries.
             tracks = await request.app.state.gaanapy.get_track_info([track_id])
-            if cache and not (isinstance(tracks, dict) and "error" in tracks):
-                await cache.set(cache_key, tracks, config.TTL_SONG)
         except Exception:
             tracks = None
 

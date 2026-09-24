@@ -35,6 +35,7 @@ from api.personalization.routes import users_router
 from api.personalization.v1_routes import router as v1_personalization_router
 from api.pulse.routes import router as pulse_router, api_router as personalized_pulse_router
 from api.personalization.service import PersonalizedMusicService
+from api.songs.playback import song_info_cache_key
 from api.core.performance import record as record_performance
 
 # ---------------------------------------------------------------------------
@@ -533,17 +534,9 @@ async def songs_info(
         raise HTTPException(status_code=422, detail="seokey, query, or title is required")
     seokey = seokey or (title.replace(" ", "-").lower() if title else "")
     gaana = _gaana(request)
-    cache = _cache(request)
-
-    key = f"songs:info:{seokey}"
-
-    result = await _cached(
-        cache,
-        key,
-        config.TTL_SONG,
-        lambda: gaana.get_track_info([seokey], force_refresh=refresh),
-        force_fresh=refresh,
-    )
+    # Playback resolution validates the stream and owns its short-lived,
+    # versioned cache; entries without a playable stream are never cached.
+    result = await gaana.resolve_song_playback(seokey, refresh=refresh)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
 
@@ -560,7 +553,7 @@ async def songs_stream_info(
     dur = duration
     if not dur:
         cache = _cache(request)
-        cached = await cache.get(f"songs:info:{song_id}")
+        cached = await cache.get(song_info_cache_key(song_id))
         if isinstance(cached, list) and cached and cached[0].get("duration"):
             try:
                 dur = int(float(cached[0]["duration"]))

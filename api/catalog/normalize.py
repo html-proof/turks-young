@@ -3,7 +3,7 @@ import html
 import json
 import re
 from typing import Any
-from api.catalog.artwork import artwork_candidates, normalize_url
+from api.catalog.artwork import artwork_candidates, normalize_url, with_upgraded_candidates
 
 from api.catalog.labels import is_verified_label, label_registry
 from api.lyrics.service import duration_seconds
@@ -35,13 +35,9 @@ def compute_metadata_confidence(
 
 
 def _upgrade_image_quality(url: str | None) -> str | None:
-    if not url or not isinstance(url, str):
-        return None
-    url = url.strip()
+    url = normalize_url(url)
     if not url:
         return None
-    if url.startswith("http://"):
-        url = "https://" + url[7:]
 
     # Gaana artwork size upgrades (size_s, size_m, size_xs, size_m_1748450138 -> size_l)
     url = re.sub(r'size_[smx]+(?=[_0-9\.\-])', 'size_l', url, flags=re.IGNORECASE)
@@ -612,6 +608,12 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
     artist_image_url = normalize_url(item.get("artist_image"))
     if not artist_image_url and artists and artists[0].get("image_url"):
         artist_image_url = artists[0]["image_url"]
+    artist_image_urls = {
+        url for url in (
+            artist_image_url,
+            *(a.get("image_url") for a in artists),
+        ) if url
+    }
     meta_conf = compute_metadata_confidence(
         title=title_str,
         artists=artists,
@@ -640,7 +642,11 @@ def song(item: dict[str, Any]) -> dict[str, Any]:
         "image_url": artwork_url,
         "artworkUrl": artwork_url,
         "duration_ms": seconds * 1000,
-        "artwork_candidates": artwork_candidates([item, artist_image_url]),
+        # Artist portraits stay in artist_image; they are never track covers.
+        "artwork_candidates": [
+            url for url in with_upgraded_candidates(artwork_candidates(item), _upgrade_image_quality)
+            if url not in artist_image_urls
+        ],
         "durationMs": seconds * 1000,
         "language": str(item.get("language") or ""),
         "label": label_str,

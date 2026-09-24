@@ -27,7 +27,9 @@ def normalize_url(value, provider_base=None):
         path = url.path.lower()
         if any(token in path for token in ("placeholder", "artist-default", "default-album")) or path.endswith(".html"):
             return None
-        if url.scheme == "http" and url.hostname.endswith(".gaanacdn.com"):
+        if url.scheme == "http":
+            # Mobile clients block cleartext traffic; every artwork CDN we
+            # receive from the provider also serves the same path over TLS.
             url = url._replace(scheme="https")
         return urlunsplit(url)
     except ValueError:
@@ -59,4 +61,20 @@ def artwork_candidates(value, provider_base=None):
                 visit(item.get(key), depth + 1)
 
     visit(value)
+    return result
+
+
+def with_upgraded_candidates(candidates, upgrade):
+    """Place a higher-resolution guess before each URL without dropping it.
+
+    Size upgrades are string rewrites of provider CDN paths and are not
+    guaranteed to exist, so the original URL always stays in the list as the
+    next fallback.
+    """
+    result = []
+    for url in candidates:
+        upgraded = normalize_url(upgrade(url)) if url else None
+        for candidate in (upgraded, url):
+            if candidate and candidate not in result:
+                result.append(candidate)
     return result
