@@ -194,3 +194,159 @@ def identity_score(target: dict[str, Any], candidate: dict[str, Any]) -> float:
         score += _WEIGHTS["year"]
 
     return round(score, 4)
+
+
+class PlaybackResolver:
+    """Centralized playback resolver.
+    
+    1. Verifies stream with ranged GET requests (Range: bytes=0-2047, status 200/206).
+    2. Follows redirects.
+    3. Resolves primary provider.
+    4. If primary fails, resolves alternate variants or alternate providers.
+    5. Recovers by high-confidence identity search (threshold >= 0.88).
+    6. Manages versioned short-lived playback caching (playback:v2:gaana:{id}).
+    7. Emits structured observability logs.
+    """
+
+    def __init__(self, cache: Any = None, http_client: Any = None, gaana: Any = None) -> None:
+        self.cache = cache
+        self.http_client = http_client
+        self.gaana = gaana
+
+    async def resolve(
+        self,
+        track_or_id: dict[str, Any] | str,
+        *,
+        refresh: bool = False,
+        client: httpx.AsyncClient | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        track_id = ""
+        track_meta: dict[str, Any] = {}
+        if isinstance(track_or_id, str):
+            track_id = track_or_id.strip()
+            track_meta = {"track_id": track_id, "seokey": track_id}
+        elif isinstance(track_or_id, dict):
+            track_meta = track_or_id
+            track_id = str(
+                track_meta.get("track_id")
+                or track_meta.get("seokey")
+                or track_meta.get("id")
+                or ""
+            ).strip()
+
+        title = track_meta.get("title") or ""
+        primary_source = track_meta.get("source") or "gaana"
+        logger.info(
+            "PLAYBACK_RESOLVE_STARTED track_id=%s title=%s primary_source=%s",
+            track_id, title or "(pending)", primary_source,
+        )
+
+        key = playback_cache_key(track_id)
+        if self.cache and hasattr(self.cache, "get") and not refresh and track_id:
+            try:
+                cached = await self.cache.get(key)
+                if isinstance(cached, dict) and cached.get("playable") and cached.get("stream", {}).get("url"):
+                    stream_url = cached["stream"]["url"]
+                    expiry = stream_expiry(stream_url)
+                    if expiry is None or (expiry - int(time.time())) > 30:
+                        return cached
+                    else:
+                        # Expired cached URL: invalidate it
+                        if hasattr(self.cache, "delete"):
+                            await self.cache.delete(key)
+            except Exception:
+                pass
+
+        if self.gaana is None:
+            # Standalone validation on given track metadata
+            stream_url = track_meta.get("stream_url") or track_meta.get("streamUrl") or ""
+            if stream_url:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=config.STREAM_VALIDATION_TIMEOUT) as local_client:
+                    check = await validate_stream(client or local_client, stream_url)
+                    if check.ok:
+                        ttl = playback_cache_ttl(stream_url)
+                        res = {
+                            "track_id": track_id,
+                            "playable": True,
+                            "stream": {
+                                "url": stream_url,
+                                "expires_at": str(stream_expiry(stream_url)) if stream_expiry(stream_url) else None,
+                                "quality": "96kbps",
+                            },
+                            "artwork": {
+                                "url": track_meta.get("imageUrl") or track_meta.get("image_url") or "",
+                                "source": "track",
+                            },
+                            "playback_source": {"provider": primary_source, "id": track_id},
+                        }
+                        if self.cache and hasattr(self.cache, "set") and ttl > 0:
+                            try:
+                                await self.cache.set(key, res, ttl)
+                            except Exception:
+                                pass
+                        return res
+
+            return {
+                "track_id": track_id,
+                "playable": False,
+                "reason": NO_VALID_SOURCE,
+            }
+
+        # Resolve through Gaana/catalog adapter
+        resolved_list = await self.gaana.resolve_song_playback(track_id, refresh=refresh)
+        if isinstance(resolved_list, list) and resolved_list:
+            resolved_track = resolved_list[0]
+            if resolved_track.get("playable") and resolved_track.get("stream_url"):
+                stream_url = resolved_track["stream_url"]
+                source_info = resolved_track.get("playback_source") or {"provider": "gaana", "id": track_id}
+                ttl = playback_cache_ttl(stream_url)
+                expires_at = stream_expiry(stream_url)
+                result = {
+                    "track_id": track_id,
+                    "playable": True,
+                    "stream": {
+                        "url": stream_url,
+                        "expires_at": str(expires_at) if expires_at else None,
+                        "quality": "96kbps",
+                    },
+                    "artwork": {
+                        "url": resolved_track.get("imageUrl") or resolved_track.get("image_url") or "",
+                        "source": "album" if resolved_track.get("album") else "track",
+                    },
+                    "playback_source": source_info,
+                    "canonical_track": resolved_track,
+                }
+                logger.info(
+                    "PLAYBACK_RESOLVED track_id=%s source=%s provider=%s url=%s latency_ms=%.1f",
+                    track_id, source_info.get("provider", "gaana"), primary_source,
+                    redact_url(stream_url), (time.perf_counter() - started) * 1000,
+                )
+                if self.cache and hasattr(self.cache, "set") and ttl > 0:
+                    try:
+                        await self.cache.set(key, result, ttl)
+                    except Exception:
+                        pass
+                return result
+            else:
+                reason = resolved_track.get("unavailable_reason") or NO_VALID_SOURCE
+                logger.warning(
+                    "PLAYBACK_UNAVAILABLE track_id=%s reason=%s latency_ms=%.1f",
+                    track_id, reason, (time.perf_counter() - started) * 1000,
+                )
+                return {
+                    "track_id": track_id,
+                    "playable": False,
+                    "reason": reason,
+                }
+
+        logger.warning(
+            "PLAYBACK_UNAVAILABLE track_id=%s reason=%s latency_ms=%.1f",
+            track_id, NO_VALID_SOURCE, (time.perf_counter() - started) * 1000,
+        )
+        return {
+            "track_id": track_id,
+            "playable": False,
+            "reason": NO_VALID_SOURCE,
+        }
+

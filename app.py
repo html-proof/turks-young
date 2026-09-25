@@ -35,7 +35,8 @@ from api.personalization.routes import users_router
 from api.personalization.v1_routes import router as v1_personalization_router
 from api.pulse.routes import router as pulse_router, api_router as personalized_pulse_router
 from api.personalization.service import PersonalizedMusicService
-from api.songs.playback import song_info_cache_key
+from api.songs.playback import song_info_cache_key, PlaybackResolver
+from api.catalog.artwork import ArtworkResolver
 from api.core.performance import record as record_performance
 
 # ---------------------------------------------------------------------------
@@ -541,6 +542,34 @@ async def songs_info(
         raise HTTPException(status_code=404, detail=result["error"])
 
     return result
+
+
+@app.post("/tracks/{track_id}/resolve-playback", summary="Resolve a verified playable stream for a track.")
+@app.get("/tracks/{track_id}/resolve-playback", summary="Resolve a verified playable stream for a track.")
+@app.post("/api/tracks/{track_id}/resolve-playback", summary="Resolve a verified playable stream for a track.")
+@app.get("/api/tracks/{track_id}/resolve-playback", summary="Resolve a verified playable stream for a track.")
+async def tracks_resolve_playback(
+    request: Request,
+    track_id: str = Path(..., min_length=1, max_length=500),
+    refresh: bool = Query(False),
+):
+    gaana = _gaana(request)
+    cache = _cache(request)
+    resolver = PlaybackResolver(cache=cache, gaana=gaana)
+    return await resolver.resolve(track_id, refresh=refresh)
+
+
+@app.get("/tracks/{track_id}/artwork", summary="Resolve high-resolution artwork for a track.")
+@app.get("/api/tracks/{track_id}/artwork", summary="Resolve high-resolution artwork for a track.")
+async def tracks_artwork(
+    request: Request,
+    track_id: str = Path(..., min_length=1, max_length=500),
+    refresh: bool = Query(False),
+):
+    cache = _cache(request)
+    catalog = getattr(request.app.state, "catalog_service", None)
+    resolver = ArtworkResolver(cache=cache, catalog=catalog)
+    return await resolver.resolve(track_id, refresh=refresh)
 
 
 @app.get("/songs/{song_id}/stream-info", summary="Calculate bandwidth and data consumption variants for a song.")
